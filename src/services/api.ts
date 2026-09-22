@@ -460,8 +460,11 @@ export async function sendChatMessage(
           try {
             const parsed = JSON.parse(jsonStr);
             if (parsed.type === 'token' && typeof parsed.content === 'string') {
-              accumulatedContent += parsed.content;
-              onToken(parsed.content);
+              const cleanToken = parsed.content.replace(/\[CITE:[a-zA-Z0-9_-]+\]/g, '');
+              accumulatedContent += cleanToken;
+              if (cleanToken) {
+                onToken(cleanToken);
+              }
             } else if (parsed.type === 'citation' && Array.isArray(parsed.clause_ids)) {
               triggeredClauseIds.push(...parsed.clause_ids);
               if (onCitation) {
@@ -477,10 +480,16 @@ export async function sendChatMessage(
       }
     }
 
+    const finalCleaned = (accumulatedContent || 'Analysis completed.')
+      .replace(/\[CITE:[a-zA-Z0-9_-]+\]/g, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/ +([.,;!?])/g, '$1')
+      .trim();
+
     return {
       id: `msg_asst_${Date.now()}`,
       role: 'assistant',
-      content: accumulatedContent || 'Analysis completed.',
+      content: finalCleaned,
       timestamp: new Date().toISOString(),
       triggeredClauseIds: Array.from(new Set(triggeredClauseIds)),
       counterProposal,

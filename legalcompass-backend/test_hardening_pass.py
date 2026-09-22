@@ -236,10 +236,11 @@ def test_fix_4_copilot_context_retrieval():
     print(f"  [PASS] 2. Selected clause 20 includes neighbors 19 and 21: {ctx_ids}")
 
     # 3. Citation integrity: citations must only reference clauses provided in context
-    citation_ids = [c.id for c in context_clauses[:3]]
-    for cid in citation_ids:
-        assert any(c.id == cid for c in context_clauses), f"Citation {cid} not in context!"
-    print(f"  [PASS] 3. Citation integrity confirmed: {citation_ids} all exist in context.")
+    from app.services.llm_service import extract_citations_and_clean_text
+    model_response = f"Reviewing obligations under [CITE:{selected_id}]."
+    extracted, _ = extract_citations_and_clean_text(model_response, {c.id for c in context_clauses})
+    assert extracted == [selected_id], f"Expected [{selected_id}], got {extracted}"
+    print(f"  [PASS] 3. Citation integrity confirmed: {extracted} referenced from context.")
 
     # 4. Chat session fairness preservation
     test_session_id = "test_fairness_session"
@@ -261,6 +262,198 @@ def test_fix_4_copilot_context_retrieval():
     print("  [PASS] 5. chat.py route imported and verified with real session fairness.")
 
 
+def test_fix_5_chat_citation_and_suggestion_hardening():
+    print("\n--- [FIX 5] Testing Chat Citation Integrity & Suggestion Event Delivery ---")
+    import json
+    from unittest.mock import MagicMock, AsyncMock
+    from app.services.llm_service import (
+        llm_service,
+        extract_citations_and_clean_text,
+        CitationStreamFilter,
+    )
+
+    # 5 test clauses
+    clauses = [
+        Clause(
+            id=f"clause_{i}",
+            index=i,
+            title=f"Section {i} {'Liability' if i == 4 else 'Standard'}",
+            text=f"Legal verbiage for clause {i}.",
+            riskLevel="HIGH" if i == 4 else "LOW",
+            plainSummary=f"Summary of clause {i}",
+            suggestion="Cap liability to total fees paid." if i == 4 else None,
+            pageNumber=1,
+        )
+        for i in range(1, 6)
+    ]
+    allowed_ids = {c.id for c in clauses}
+
+    # TEST 1 — Citation IDs come from actual context only
+    model_text_1 = "Under the agreement, exposure is governed by [CITE:clause_4] which creates high liability."
+    valid_cites_1, cleaned_1 = extract_citations_and_clean_text(model_text_1, allowed_ids)
+    assert valid_cites_1 == ["clause_4"], f"Expected ['clause_4'], got {valid_cites_1}"
+    assert "clause_1" not in valid_cites_1
+    assert "clause_2" not in valid_cites_1
+    assert "clause_3" not in valid_cites_1
+    print("  [PASS] TEST 1: Citation IDs come from actual context only (clause_4, not 1, 2, 3).")
+
+    # TEST 2 — Invalid citation IDs rejected
+    model_text_2 = "This term is subject to statutory rules [CITE:clause_999]."
+    valid_cites_2, cleaned_2 = extract_citations_and_clean_text(model_text_2, allowed_ids)
+    assert valid_cites_2 == [], f"Expected empty list for nonexistent clause_999, got {valid_cites_2}"
+    assert "clause_999" not in valid_cites_2
+    print("  [PASS] TEST 2: Invalid citation IDs (clause_999) rejected silently.")
+
+    # TEST 3 — Duplicate citation deduplication
+    model_text_3 = "See liability in [CITE:clause_4] and further remedies in [CITE:clause_4]."
+    valid_cites_3, cleaned_3 = extract_citations_and_clean_text(model_text_3, allowed_ids)
+    assert valid_cites_3 == ["clause_4"], f"Expected deduplicated ['clause_4'], got {valid_cites_3}"
+    print("  [PASS] TEST 3: Duplicate citations deduplicated while preserving order.")
+
+    # TEST 4 — Multiple citations
+    model_text_4 = "Refer to indemnification in [CITE:clause_2] and termination in [CITE:clause_5]."
+    valid_cites_4, cleaned_4 = extract_citations_and_clean_text(model_text_4, allowed_ids)
+    assert valid_cites_4 == ["clause_2", "clause_5"], f"Expected ['clause_2', 'clause_5'], got {valid_cites_4}"
+    print("  [PASS] TEST 4: Multiple valid citations preserved in exact order.")
+
+    # TEST 5 — Citation marker removed from final visible response
+    input_text_5 = "Payment is delayed. [CITE:clause_5]"
+    _, cleaned_5 = extract_citations_and_clean_text(input_text_5, allowed_ids)
+    assert "[CITE:clause_5]" not in cleaned_5, f"Citation marker remained in text: {cleaned_5}"
+    assert cleaned_5 == "Payment is delayed."
+
+    # Also verify CitationStreamFilter on chunk boundary
+    filter_inst = CitationStreamFilter()
+    out1 = filter_inst.process_chunk("Payment is delayed. [CITE:")
+    out2 = filter_inst.process_chunk("clause_5] Please negotiate.")
+    out3 = filter_inst.flush()
+    streamed_visible = out1 + out2 + out3
+    assert "[CITE:clause_5]" not in streamed_visible, f"Citation marker leaked into stream: {streamed_visible}"
+    assert "Payment is delayed." in streamed_visible
+    assert "Please negotiate." in streamed_visible
+    print("  [PASS] TEST 5: Citation markers completely removed from final visible text & streamed tokens.")
+
+    # TEST 6 — No citation
+    model_text_6 = "Hello! How can I assist you with your contract analysis today?"
+    valid_cites_6, cleaned_6 = extract_citations_and_clean_text(model_text_6, allowed_ids)
+    assert valid_cites_6 == [], f"Expected empty list, got {valid_cites_6}"
+    assert cleaned_6 == model_text_6
+    print("  [PASS] TEST 6: No citation markers produce deterministic empty citation list.")
+
+    # TEST 7 — Suggestion event
+    suggestion = llm_service._get_applicable_suggestion(clauses)
+    assert suggestion is not None, "Expected suggestion for HIGH-risk clause with pushback"
+    assert suggestion["type"] == "suggestion"
+    assert suggestion["target_clause_id"] == "clause_4"
+    assert suggestion["counter_clause"] == "Cap liability to total fees paid."
+    assert len(suggestion["rationale"]) > 0
+    print("  [PASS] TEST 7: Suggestion event generated correctly for HIGH-risk clause.")
+
+    # TEST 8 — No suggestion
+    low_risk_clauses = [c for c in clauses if c.id != "clause_4"]
+    no_suggestion = llm_service._get_applicable_suggestion(low_risk_clauses)
+    assert no_suggestion is None, f"Expected None when no HIGH-risk clause with pushback, got {no_suggestion}"
+    print("  [PASS] TEST 8: No suggestion event generated when no HIGH-risk clause with pushback.")
+
+    # TEST 9 — Provider-path consistency & full SSE stream event order
+    async def run_sse_order_test():
+        # Test full SSE stream through heuristic fallback generator
+        events = []
+        async for sse_chunk in llm_service.stream_chat_response(
+            session_id="test_sess",
+            query="Analyze liability",
+            context_clauses=clauses,
+        ):
+            for line in sse_chunk.split("\n"):
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        event_types = [e.get("type") for e in events]
+
+        # Verify event order: token(s) -> suggestion -> citation -> done
+        assert "token" in event_types, "Missing token events"
+        last_token_idx = max(i for i, t in enumerate(event_types) if t == "token")
+
+        assert "suggestion" in event_types, "Missing suggestion event"
+        sugg_idx = event_types.index("suggestion")
+
+        assert "citation" in event_types, "Missing citation event"
+        cite_idx = event_types.index("citation")
+
+        assert "done" in event_types, "Missing done event"
+        done_idx = event_types.index("done")
+
+        assert last_token_idx < sugg_idx, f"Tokens must finish before suggestion: token={last_token_idx}, sugg={sugg_idx}"
+        assert sugg_idx < cite_idx, f"Suggestion must precede citation: sugg={sugg_idx}, cite={cite_idx}"
+        assert cite_idx < done_idx, f"Citation must precede done: cite={cite_idx}, done={done_idx}"
+
+        # Verify suggestion event structure matches canonical format
+        sugg_event = events[sugg_idx]
+        assert sugg_event == suggestion, "Suggestion event in stream does not match canonical helper payload"
+
+        # Verify citation event contains clause_1 from heuristic stream and no leaked markers
+        cite_event = events[cite_idx]
+        assert "clause_ids" in cite_event
+        for token_ev in [e for e in events if e.get("type") == "token"]:
+            assert "[CITE:" not in token_ev.get("content", ""), f"Leaked citation marker in token: {token_ev}"
+
+        # Verify Gemini / Groq mocked provider consistency
+        gemini_mock = MagicMock()
+        mock_chunk = MagicMock()
+        mock_chunk.text = "Grounded analysis [CITE:clause_4] completed."
+        gemini_mock.models.generate_content_stream.return_value = [mock_chunk]
+        llm_service._gemini_client = gemini_mock
+
+        gemini_events = []
+        async for sse_chunk in llm_service.stream_chat_response("test", "query", clauses):
+            for line in sse_chunk.split("\n"):
+                if line.startswith("data: "):
+                    gemini_events.append(json.loads(line[6:]))
+
+        gemini_types = [e.get("type") for e in gemini_events]
+        gemini_type_sequence = [t for i, t in enumerate(gemini_types) if i == 0 or t != gemini_types[i-1]]
+        assert gemini_type_sequence == ["token", "suggestion", "citation", "done"], f"Gemini event sequence mismatch: {gemini_type_sequence}"
+        gemini_sugg = next(e for e in gemini_events if e.get("type") == "suggestion")
+        assert gemini_sugg == suggestion, "Gemini suggestion format mismatch"
+        gemini_cite = next(e for e in gemini_events if e.get("type") == "citation")
+        assert gemini_cite["clause_ids"] == ["clause_4"], f"Gemini citations mismatch: {gemini_cite}"
+
+        # Mock Groq failover
+        llm_service._gemini_client = None  # Force Gemini to fail / be absent
+        groq_mock = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.delta.content = "Groq analysis [CITE:clause_4] completed."
+        mock_groq_chunk = MagicMock()
+        mock_groq_chunk.choices = [mock_choice]
+
+        async def mock_groq_generator():
+            yield mock_groq_chunk
+
+        groq_mock.chat.completions.create = AsyncMock(return_value=mock_groq_generator())
+        llm_service._groq_client = groq_mock
+
+        groq_events = []
+        async for sse_chunk in llm_service.stream_chat_response("test", "query", clauses):
+            for line in sse_chunk.split("\n"):
+                if line.startswith("data: "):
+                    groq_events.append(json.loads(line[6:]))
+
+        groq_types = [e.get("type") for e in groq_events]
+        groq_type_sequence = [t for i, t in enumerate(groq_types) if i == 0 or t != groq_types[i-1]]
+        assert groq_type_sequence == ["token", "suggestion", "citation", "done"], f"Groq event sequence mismatch: {groq_type_sequence}"
+        groq_sugg = next(e for e in groq_events if e.get("type") == "suggestion")
+        assert groq_sugg == suggestion, "Groq suggestion format mismatch"
+        groq_cite = next(e for e in groq_events if e.get("type") == "citation")
+        assert groq_cite["clause_ids"] == ["clause_4"], f"Groq citations mismatch: {groq_cite}"
+
+        # Reset clients
+        llm_service._gemini_client = None
+        llm_service._groq_client = None
+
+    asyncio.run(run_sse_order_test())
+    print("  [PASS] TEST 9: Provider-path consistency & deterministic SSE event order verified across all 3 providers.")
+
+
 if __name__ == "__main__":
     print("==================================================================")
     print("RUNNING LEGALCOMPASS TARGETED HARDENING REGRESSION SUITE")
@@ -269,6 +462,7 @@ if __name__ == "__main__":
     test_fix_2_page_mapping_and_offsets()
     test_fix_3_fairness_score_calculation()
     test_fix_4_copilot_context_retrieval()
+    test_fix_5_chat_citation_and_suggestion_hardening()
     print("\n==================================================================")
-    print("ALL 4 TARGETED FIXES VERIFIED AND PASSED WITH ZERO FAILURES!")
+    print("ALL 5 TARGETED FIXES VERIFIED AND PASSED WITH ZERO FAILURES!")
     print("==================================================================")

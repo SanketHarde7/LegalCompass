@@ -1,8 +1,9 @@
+import re
 import json
 import logging
 import asyncio
 from datetime import datetime, timezone
-from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple
+from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple, Set
 from app.core.config import settings
 from app.core.prompts import AUDITOR_PROMPT, SIMULATION_PROMPT, COPILOT_CHAT_PROMPT
 from app.schemas.contract import Clause, ContractDocument, PageContent
@@ -11,6 +12,84 @@ from app.services.heuristic_engine import heuristic_engine
 from app.services.fairness_calculator import calculate_overall_fairness
 
 logger = logging.getLogger(__name__)
+
+CITE_PATTERN = re.compile(r"\[CITE:([a-zA-Z0-9_-]+)\]")
+
+
+def extract_citations_and_clean_text(
+    text: str, allowed_clause_ids: Set[str]
+) -> Tuple[List[str], str]:
+    """Extracts valid, deduplicated citation IDs and strips citation markers from text.
+
+    - Extracts all [CITE:clause_id] markers
+    - Validates each against allowed_clause_ids
+    - Discards invalid IDs silently
+    - Deduplicates while preserving order
+    - Removes all [CITE:...] markers from user-facing text
+    """
+    raw_citations = CITE_PATTERN.findall(text)
+    valid_citations: List[str] = []
+    seen: Set[str] = set()
+
+    for cid in raw_citations:
+        cid_clean = cid.strip()
+        if cid_clean in allowed_clause_ids and cid_clean not in seen:
+            valid_citations.append(cid_clean)
+            seen.add(cid_clean)
+
+    # Clean markers from text and normalize leftover duplicate spacing
+    cleaned = CITE_PATTERN.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" +([.,;!?])", r"\1", cleaned)
+
+    return valid_citations, cleaned.strip()
+
+
+class CitationStreamFilter:
+    """Filters [CITE:...] markers on the fly from streaming token chunks so they never leak to UI."""
+
+    def __init__(self):
+        self.buffer = ""
+
+    def process_chunk(self, chunk: str) -> str:
+        self.buffer += chunk
+        if "[" not in self.buffer:
+            out = self.buffer
+            self.buffer = ""
+            return out
+
+        # If complete markers exist in buffer, strip them
+        while True:
+            match = CITE_PATTERN.search(self.buffer)
+            if match:
+                prefix = self.buffer[: match.start()]
+                self.buffer = prefix + self.buffer[match.end() :]
+            else:
+                break
+
+        # Check if buffer ends with a potential partial marker
+        last_bracket = self.buffer.rfind("[")
+        if last_bracket != -1:
+            potential_marker = self.buffer[last_bracket:]
+            if (
+                potential_marker.startswith("[CITE:")
+                or "[CITE:".startswith(potential_marker)
+            ) and len(potential_marker) < 45:
+                out = self.buffer[:last_bracket]
+                self.buffer = potential_marker
+                return out
+
+        out = self.buffer
+        self.buffer = ""
+        return out
+
+    def flush(self) -> str:
+        """Flushes any remaining text at end of stream after removing any citation markers."""
+        cleaned = CITE_PATTERN.sub("", self.buffer)
+        cleaned = re.sub(r"\[CITE:[^\]]*$", "", cleaned)
+        cleaned = re.sub(r"\[CITE?$", "", cleaned)
+        self.buffer = ""
+        return cleaned
 
 
 class LLMService:
@@ -30,29 +109,31 @@ class LLMService:
     # Client Initializations
     # =========================================================================
     def _get_gemini_client(self):
+        if self._gemini_client is not None:
+            return self._gemini_client if self._gemini_client is not False else None
         if not settings.GEMINI_API_KEY:
             return None
-        if self._gemini_client is None:
-            try:
-                from google import genai
-                self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-                logger.info(f"Gemini client initialized with model: {settings.GEMINI_MODEL_ID}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize google-genai client: {e}")
-                self._gemini_client = False
+        try:
+            from google import genai
+            self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            logger.info(f"Gemini client initialized with model: {settings.GEMINI_MODEL_ID}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize google-genai client: {e}")
+            self._gemini_client = False
         return self._gemini_client if self._gemini_client is not False else None
 
     def _get_groq_client(self):
+        if self._groq_client is not None:
+            return self._groq_client if self._groq_client is not False else None
         if not settings.GROQ_API_KEY:
             return None
-        if self._groq_client is None:
-            try:
-                from groq import AsyncGroq
-                self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-                logger.info(f"Groq client initialized with model: {settings.GROQ_MODEL_ID}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Groq client: {e}")
-                self._groq_client = False
+        try:
+            from groq import AsyncGroq
+            self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+            logger.info(f"Groq client initialized with model: {settings.GROQ_MODEL_ID}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Groq client: {e}")
+            self._groq_client = False
         return self._groq_client if self._groq_client is not False else None
 
     # =========================================================================
@@ -192,18 +273,56 @@ class LLMService:
         logger.info("Using deterministic heuristic legal rules engine for contract analysis.")
         return self._heuristic_analysis(session_id, filename, initial_clauses, page_objects, document_title)
 
+    def _get_applicable_suggestion(self, context_clauses: List[Clause]) -> Optional[Dict[str, Any]]:
+        """Canonical helper: finds first HIGH-risk clause with suggested_pushback.
+        Returns structured suggestion payload or None when no suggestion exists.
+        """
+        if not context_clauses:
+            return None
+        high_risk = next(
+            (
+                c for c in context_clauses
+                if (c.risk_level == "HIGH" or getattr(c, "riskLevel", None) == "HIGH")
+                and (c.suggested_pushback or getattr(c, "suggestion", None))
+            ),
+            None,
+        )
+        if high_risk:
+            pushback = high_risk.suggested_pushback or getattr(high_risk, "suggestion", None)
+            return {
+                "type": "suggestion",
+                "target_clause_id": high_risk.id,
+                "counter_clause": pushback,
+                "rationale": f"Replaces one-sided language in {high_risk.title} with mutual, capped obligations.",
+            }
+        return None
+
     # =========================================================================
     # Streaming Chat Copilot (SSE)
     # =========================================================================
     async def stream_chat_response(
         self,
-        session_id: str,
-        query: str,
-        context_clauses: List[Clause],
+        session_id: str = "",
+        query: str = "",
+        context_clauses: Optional[List[Clause]] = None,
         history: Optional[List[Dict[str, str]]] = None,
         contract_info: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> AsyncGenerator[str, None]:
-        """Streams assistant response token-by-token using Server-Sent Events (SSE)."""
+        """Streams assistant response token-by-token using Server-Sent Events (SSE).
+        Deterministic event order:
+        1. token events (with citation markers filtered out on the fly)
+        2. suggestion event, if applicable
+        3. citation event (valid context clause IDs only, deduplicated, ordered)
+        4. done event
+        """
+        # Flexible positional handling if query passed as 1st arg and context_clauses as 2nd arg
+        if isinstance(session_id, str) and isinstance(query, list) and context_clauses is None:
+            context_clauses = query
+            query = session_id
+            session_id = ""
+        context_clauses = context_clauses or []
+
         filename = contract_info.get("filename", "Active Contract") if contract_info else "Active Contract"
         fairness = contract_info.get("overall_fairness_score", "N/A") if contract_info else "N/A"
 
@@ -213,10 +332,8 @@ class LLMService:
                 for c in context_clauses
             ]
         ) if context_clauses else "General contract terms."
-        citation_ids = [c.id for c in context_clauses[:3]]
 
-        # Send citation metadata chunk first
-        yield f'data: {{"type": "citation", "clause_ids": {json.dumps(citation_ids)}}}\n\n'
+        allowed_clause_ids: Set[str] = {c.id for c in context_clauses} if context_clauses else set()
 
         system_message = (
             f"{COPILOT_CHAT_PROMPT}\n\n"
@@ -227,6 +344,7 @@ class LLMService:
         )
 
         streamed_success = False
+        accumulated_raw_text = ""
 
         # 1. Try Gemini (Primary Engine with Multi-Turn Conversational Memory)
         gemini = self._get_gemini_client()
@@ -254,18 +372,26 @@ class LLMService:
                         "max_output_tokens": 1000,
                     },
                 )
-                accumulated_text = ""
+                stream_filter = CitationStreamFilter()
+                accumulated_raw_text = ""
                 for chunk in response_stream:
                     if chunk.text:
-                        accumulated_text += chunk.text
-                        payload = json.dumps({"type": "token", "content": chunk.text})
-                        yield f"data: {payload}\n\n"
-                        await asyncio.sleep(0.01)
+                        accumulated_raw_text += chunk.text
+                        filtered = stream_filter.process_chunk(chunk.text)
+                        if filtered:
+                            payload = json.dumps({"type": "token", "content": filtered})
+                            yield f"data: {payload}\n\n"
+                            await asyncio.sleep(0.01)
+
+                flushed = stream_filter.flush()
+                if flushed:
+                    payload = json.dumps({"type": "token", "content": flushed})
+                    yield f"data: {payload}\n\n"
 
                 streamed_success = True
-                await self._emit_suggestion_if_applicable(context_clauses)
             except Exception as e:
                 logger.warning(f"Gemini streaming failed: {e}. Failing over to Groq...")
+                accumulated_raw_text = ""
 
         # 2. Try Groq (Failover with Conversational Memory)
         if not streamed_success:
@@ -289,48 +415,58 @@ class LLMService:
                         max_tokens=350,
                         stream=True,
                     )
+                    stream_filter = CitationStreamFilter()
+                    accumulated_raw_text = ""
                     async for chunk in stream:
                         delta = chunk.choices[0].delta.content or ""
                         if delta:
-                            payload = json.dumps({"type": "token", "content": delta})
-                            yield f"data: {payload}\n\n"
-                            await asyncio.sleep(0.01)
+                            accumulated_raw_text += delta
+                            filtered = stream_filter.process_chunk(delta)
+                            if filtered:
+                                payload = json.dumps({"type": "token", "content": filtered})
+                                yield f"data: {payload}\n\n"
+                                await asyncio.sleep(0.01)
+
+                    flushed = stream_filter.flush()
+                    if flushed:
+                        payload = json.dumps({"type": "token", "content": flushed})
+                        yield f"data: {payload}\n\n"
 
                     streamed_success = True
-                    await self._emit_suggestion_if_applicable(context_clauses)
                 except Exception as e:
                     logger.warning(f"Groq streaming failed: {e}. Using heuristic streaming fallback...")
+                    accumulated_raw_text = ""
 
         # 3. Fallback Heuristic Generator
         if not streamed_success:
+            stream_filter = CitationStreamFilter()
+            accumulated_raw_text = ""
             async for token in self._heuristic_stream(query, context_clauses):
-                payload = json.dumps({"type": "token", "content": token})
+                accumulated_raw_text += token
+                filtered = stream_filter.process_chunk(token)
+                if filtered:
+                    payload = json.dumps({"type": "token", "content": filtered})
+                    yield f"data: {payload}\n\n"
+                    await asyncio.sleep(0.02)
+
+            flushed = stream_filter.flush()
+            if flushed:
+                payload = json.dumps({"type": "token", "content": flushed})
                 yield f"data: {payload}\n\n"
-                await asyncio.sleep(0.02)
 
-            # Suggestion event if high risk clause exists
-            high_risk = next((c for c in context_clauses if c.risk_level == "HIGH"), None)
-            if high_risk and high_risk.suggested_pushback:
-                suggestion_data = {
-                    "type": "suggestion",
-                    "target_clause_id": high_risk.id,
-                    "counter_clause": high_risk.suggested_pushback,
-                    "rationale": f"Replaces one-sided language in {high_risk.title} with mutual, capped obligations.",
-                }
-                yield f"data: {json.dumps(suggestion_data)}\n\n"
+            streamed_success = True
 
+        # 2. Suggestion event, if applicable (canonical implementation for all paths)
+        suggestion_payload = self._get_applicable_suggestion(context_clauses)
+        if suggestion_payload:
+            yield f"data: {json.dumps(suggestion_payload)}\n\n"
+
+        # 3. Citation event (grounded strictly in context_clauses, deduplicated, ordered)
+        valid_citations, _ = extract_citations_and_clean_text(accumulated_raw_text, allowed_clause_ids)
+        yield f'data: {{"type": "citation", "clause_ids": {json.dumps(valid_citations)}}}\n\n'
+
+        # 4. Final done event
         yield 'data: {"type": "done", "total_tokens": 120}\n\n'
-
-    async def _emit_suggestion_if_applicable(self, context_clauses: List[Clause]):
-        high_risk = next((c for c in context_clauses if c.risk_level == "HIGH" and c.suggested_pushback), None)
-        if high_risk:
-            suggestion_payload = {
-                "type": "suggestion",
-                "target_clause_id": high_risk.id,
-                "counter_clause": high_risk.suggested_pushback,
-                "rationale": f"Protects against asymmetric exposures identified in {high_risk.title}.",
-            }
-            # Note: emitted in generator if needed
 
     # =========================================================================
     # Scenario Simulation
@@ -563,10 +699,11 @@ class LLMService:
     async def _heuristic_stream(self, query: str, context: List[Clause]) -> AsyncGenerator[str, None]:
         """Simulates realistic conversational streaming chunks based on context."""
         matched_clause = context[0] if context else None
+        cite_marker = f" [CITE:{matched_clause.id}]" if matched_clause else ""
         response_text = (
             f"Based on your contract terms, particularly **{matched_clause.title if matched_clause else 'the agreement'}**, "
             "here is an analysis of your operational and legal risk:\n\n"
-            f"1. **Core Exposure:** {matched_clause.plain_english_summary if matched_clause else 'Review the highlighted terms for liability caps.'}\n"
+            f"1. **Core Exposure:** {matched_clause.plain_english_summary if matched_clause else 'Review the highlighted terms for liability caps.'}{cite_marker}\n"
             "2. **Legal Leverage:** The drafting party holds significant unilateral leverage under the current draft.\n\n"
             "**Recommendation:** Propose balanced mutual terms to cap total financial liability and guarantee payment for completed milestones."
         )
