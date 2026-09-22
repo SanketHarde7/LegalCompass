@@ -360,6 +360,12 @@ export interface ContractChatContext {
   filename?: string;
   overallFairnessScore?: number;
   totalPages?: number;
+  clauseIndex?: Array<{
+    id: string;
+    title: string;
+    riskLevel?: string;
+    pageNumber?: number;
+  }>;
   clauses?: Array<{
     id: string;
     title: string;

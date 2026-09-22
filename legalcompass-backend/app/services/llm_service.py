@@ -7,6 +7,8 @@ from app.core.config import settings
 from app.core.prompts import AUDITOR_PROMPT, SIMULATION_PROMPT, COPILOT_CHAT_PROMPT
 from app.schemas.contract import Clause, ContractDocument, PageContent
 from app.schemas.simulate import ScenarioSimulationResult, TriggeredClauseItem
+from app.services.heuristic_engine import heuristic_engine
+from app.services.fairness_calculator import calculate_overall_fairness
 
 logger = logging.getLogger(__name__)
 
@@ -497,11 +499,14 @@ class LLMService:
             [c.page_number or 1 for c in analyzed_clauses] + [1]
         )
 
+        # Fix 3: Authoritative overall fairness score calculated directly from merged final clauses
+        overall_score = calculate_overall_fairness(analyzed_clauses)
+
         return ContractDocument(
             sessionId=session_id,
             filename=filename,
             uploadTimestamp=datetime.now(timezone.utc).isoformat(),
-            overallFairnessScore=score,
+            overallFairnessScore=overall_score,
             totalPages=total_pages,
             pages=page_objects,
             clauses=analyzed_clauses,
@@ -516,78 +521,30 @@ class LLMService:
         page_objects: List[PageContent],
         document_title: Optional[str] = None,
     ) -> ContractDocument:
-        """Deterministic rule-based auditor detecting high-risk terms via keywords."""
+        """Deterministic structural rule-based legal engine with negation & reciprocity."""
         evaluated_clauses: List[Clause] = []
-        high_risk_count = 0
 
         for idx, clause in enumerate(initial_clauses, start=1):
-            text_lower = (clause.title + " " + clause.text).lower()
-
-            if any(k in text_lower for k in ["indemn", "hold harmless", "uncapped liability"]):
-                category = "INDEMNIFICATION"
-                risk = "HIGH"
-                score = 92
-                summary = "Imposes uncapped unilateral indemnification on you, exposing you to personal legal defense bills if the counterparty gets sued."
-                suggestion = "Each party shall mutually indemnify the other against third-party claims arising solely from gross negligence. Total liability shall be capped at fees received under this agreement."
-                high_risk_count += 1
-            elif any(k in text_lower for k in ["intellectual property", "inventions", "work made for hire", "irrevocably assign"]):
-                category = "INTELLECTUAL_PROPERTY"
-                risk = "HIGH"
-                score = 88
-                summary = "Ownership of all code, designs, and deliverables transfers immediately upon creation, meaning they legally own your deliverables even if they default on payment."
-                suggestion = "All intellectual property rights in and to Deliverables shall transfer exclusively to Client strictly upon receipt of full and complete invoice payment."
-                high_risk_count += 1
-            elif any(k in text_lower for k in ["terminate at any time", "without cause", "forfeit unbilled"]):
-                category = "TERMINATION"
-                risk = "HIGH"
-                score = 85
-                summary = "The other party can cancel the contract at any time with immediate effect and withhold payment for in-progress work or unapproved hours."
-                suggestion = "Either party may terminate upon thirty (30) days prior written notice. Upon termination, client shall compensate contractor for all completed work and non-cancelable expenses."
-                high_risk_count += 1
-            elif any(k in text_lower for k in ["net 60", "net-90", "net 90", "sole discretion", "disputed portion"]):
-                category = "PAYMENT_TERMS"
-                risk = "MEDIUM"
-                score = 65
-                summary = "Extended delayed payment terms with subjective withholding rights that allow the client to delay or withhold pay arbitrarily."
-                suggestion = "Invoices shall be payable within thirty (30) days of receipt. Undisputed balances shall be paid without delay while good-faith disputes are resolved."
-            elif any(k in text_lower for k in ["unannounced", "enter premises", "at any hour"]):
-                category = "MISC"
-                risk = "HIGH"
-                score = 90
-                summary = "Permits landlord to enter the premises without 24 hours advance written notice, violating tenant quiet enjoyment."
-                suggestion = "Landlord may enter premises only during normal business hours with at least twenty-four (24) hours advance written notice, except for life-safety emergencies."
-                high_risk_count += 1
-            elif any(k in text_lower for k in ["wear and tear", "carpet", "deposit"]):
-                category = "PAYMENT_TERMS"
-                risk = "MEDIUM"
-                score = 60
-                summary = "Permits deductions from your security deposit for routine, ordinary wear and tear."
-                suggestion = "Security deposit deductions shall apply solely to verified physical damage exceeding ordinary wear and tear, supported by itemized receipts."
-            else:
-                category = "DISPUTE_RESOLUTION" if "dispute" in text_lower or "governing" in text_lower else "OTHER"
-                risk = "LOW"
-                score = 25
-                summary = "Standard commercial provision with reciprocal or customary obligations."
-                suggestion = None
-
+            assessment = heuristic_engine.evaluate_clause(clause.title, clause.text)
             evaluated_clauses.append(
                 Clause(
                     id=clause.id,
                     index=clause.index or idx,
                     title=clause.title,
                     text=clause.text,
-                    category=category,
-                    riskLevel=risk,
-                    plainSummary=summary,
-                    suggestion=suggestion,
-                    unfairnessScore=score,
+                    category=assessment.category,
+                    riskLevel=assessment.risk_level,
+                    plainSummary=assessment.plain_summary,
+                    suggestion=assessment.suggested_pushback,
+                    unfairnessScore=assessment.unfairness_score,
                     pageNumber=clause.page_number or 1,
                     startOffset=clause.start_offset,
                     endOffset=clause.end_offset,
                 )
             )
 
-        overall_score = max(35, 95 - (high_risk_count * 18))
+        # Fix 3: Authoritative overall fairness score calculated directly from final evaluated clauses
+        overall_score = calculate_overall_fairness(evaluated_clauses)
         total_pages = len(page_objects) if page_objects else max(
             [c.page_number or 1 for c in evaluated_clauses] + [1]
         )

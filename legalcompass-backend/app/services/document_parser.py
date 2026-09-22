@@ -104,10 +104,12 @@ class DocumentParser:
         # Root cause C: Exact start/end character offsets relative to source page text.
         # -------------------------------------------------------------------------
         clauses: List[Clause] = []
+        current_page_idx = 1
         for idx, (title, chunk_text) in enumerate(all_chunks, start=1):
             clause_id = f"clause_{idx}"
-            page_num = self._find_page_number(title, chunk_text, pages_content)
-            
+            page_num = self._find_page_number(title, chunk_text, pages_content, last_page_idx=current_page_idx)
+            current_page_idx = page_num
+
             # Retrieve page text to determine character-exact start and end offsets
             page_text = next((pt for pidx, pt in pages_content if pidx == page_num), "")
             start_offset, end_offset = self._find_offsets_in_page(chunk_text, page_text)
@@ -297,8 +299,28 @@ class DocumentParser:
 
         return ""
 
+    @staticmethod
+    def _normalize_with_mapping(text: str) -> Tuple[str, List[int]]:
+        """Collapses whitespace and maps normalized character positions to original indices."""
+        normalized_chars: List[str] = []
+        norm_to_orig: List[int] = []
+        in_space = False
+
+        for orig_idx, ch in enumerate(text):
+            if ch.isspace():
+                if not in_space:
+                    normalized_chars.append(" ")
+                    norm_to_orig.append(orig_idx)
+                    in_space = True
+            else:
+                normalized_chars.append(ch.lower())
+                norm_to_orig.append(orig_idx)
+                in_space = False
+
+        return "".join(normalized_chars), norm_to_orig
+
     def _find_offsets_in_page(self, chunk_text: str, page_text: str) -> Tuple[Optional[int], Optional[int]]:
-        """Captures character-exact start and end offsets relative to the page text."""
+        """Captures character-exact start and end offsets relative to the source page text."""
         if not page_text or not chunk_text:
             return None, None
 
@@ -307,25 +329,35 @@ class DocumentParser:
         if idx != -1:
             return idx, idx + len(chunk_text)
 
-        # 2. Match by first line / prefix anchor
-        first_line = chunk_text.splitlines()[0].strip() if chunk_text.splitlines() else ""
-        if len(first_line) > 10:
-            start_idx = page_text.find(first_line)
-            if start_idx != -1:
-                # Find last line
-                lines = [l.strip() for l in chunk_text.splitlines() if len(l.strip()) > 8]
-                if len(lines) > 1:
-                    last_line = lines[-1]
-                    last_idx = page_text.find(last_line, start_idx)
-                    if last_idx != -1:
-                        return start_idx, last_idx + len(last_line)
-                return start_idx, min(len(page_text), start_idx + len(chunk_text))
+        # 2. Normalized source match with exact coordinate mapping
+        norm_page, page_mapping = self._normalize_with_mapping(page_text)
+        norm_chunk, _ = self._normalize_with_mapping(chunk_text)
 
-        # 3. Match by normalized first words
-        words = [w for w in re.split(r"\s+", chunk_text[:80]) if w]
-        if len(words) >= 3:
-            snippet = " ".join(words[:4])
-            start_idx = page_text.find(snippet)
+        if norm_chunk and page_mapping:
+            norm_idx = norm_page.find(norm_chunk)
+            if norm_idx != -1 and norm_idx + len(norm_chunk) - 1 < len(page_mapping):
+                orig_start = page_mapping[norm_idx]
+                orig_end = page_mapping[norm_idx + len(norm_chunk) - 1] + 1
+                return orig_start, min(len(page_text), orig_end)
+
+            # Check if opening snippet (first 100 chars) matches
+            head_len = min(100, len(norm_chunk))
+            norm_head = norm_chunk[:head_len]
+            head_idx = norm_page.find(norm_head)
+            if head_idx != -1 and head_idx < len(page_mapping):
+                orig_start = page_mapping[head_idx]
+                tail_len = min(50, len(norm_chunk))
+                norm_tail = norm_chunk[-tail_len:]
+                tail_idx = norm_page.find(norm_tail, head_idx)
+                if tail_idx != -1 and tail_idx + tail_len - 1 < len(page_mapping):
+                    orig_end = page_mapping[tail_idx + tail_len - 1] + 1
+                    return orig_start, min(len(page_text), orig_end)
+                return orig_start, min(len(page_text), orig_start + len(chunk_text))
+
+        # 3. Match by distinctive first line anchor
+        first_line = chunk_text.splitlines()[0].strip() if chunk_text.splitlines() else ""
+        if len(first_line) > 12:
+            start_idx = page_text.find(first_line)
             if start_idx != -1:
                 return start_idx, min(len(page_text), start_idx + len(chunk_text))
 
@@ -376,26 +408,53 @@ class DocumentParser:
         text = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
         return text.strip()
 
-    def _find_page_number(self, title: str, chunk_text: str, pages_content: List[Tuple[int, str]]) -> int:
-        """Maps a clause snippet back to its source PDF page number accurately."""
-        # 1. Try finding by distinctive title keywords
-        clean_title = re.sub(r"^(SECTION|Clause|Article)\s*[\dIVXLCDM]+[:.]?\s*", "", title, flags=re.IGNORECASE).strip()
-        if len(clean_title) > 6:
-            for page_idx, page_text in pages_content:
-                if clean_title.lower() in page_text.lower():
+    def _find_page_number(
+        self,
+        title: str,
+        chunk_text: str,
+        pages_content: List[Tuple[int, str]],
+        last_page_idx: int = 1,
+    ) -> int:
+        """Determines page ownership using exact text location, avoiding generic title collision."""
+        if not pages_content:
+            return 1
+
+        # Generic titles that must NEVER be used for page matching alone
+        GENERIC_TITLES = {"payment", "term", "liability", "confidentiality", "indemnification", "warranty", "general", "notices", "definitions", "misc"}
+
+        # 1. Exact full chunk text in page text
+        for page_idx, page_text in pages_content:
+            if chunk_text in page_text:
+                return page_idx
+
+        # 2. Normalized chunk head (first 100 chars) in normalized page text
+        norm_chunk, _ = self._normalize_with_mapping(chunk_text[:140])
+        if len(norm_chunk) > 15:
+            # Check starting from last_page_idx forward, then wrap around
+            ordered_pages = sorted(pages_content, key=lambda p: (0 if p[0] >= last_page_idx else 1, p[0]))
+            for page_idx, page_text in ordered_pages:
+                norm_page, _ = self._normalize_with_mapping(page_text)
+                if norm_chunk in norm_page:
                     return page_idx
 
-        # 2. Try finding by distinctive body lines (skipping header tokens)
-        lines = [l.strip() for l in chunk_text.splitlines() if len(l.strip()) > 20]
-        for line in lines[:4]:
-            if any(k in line.upper() for k in ["AIRTIGHT COMMERCIAL", "STANDARD LOOPHOLE", "CONFIDENTIAL & PROPRIETARY", "PAGE "]):
+        # 3. Distinctive first substantive line (skipping running headers)
+        lines = [l.strip() for l in chunk_text.splitlines() if len(l.strip()) > 18]
+        for line in lines[:3]:
+            if any(k in line.upper() for k in ["CONFIDENTIAL", "PROPRIETARY", "PAGE "]):
                 continue
-            snip = line[:60]
+            snip = line[:50]
             for page_idx, page_text in pages_content:
                 if snip in page_text:
                     return page_idx
 
-        return 1
+        # 4. Specific non-generic title keywords (only as last resort)
+        clean_title = re.sub(r"^(?:(?:Section|Clause|Article)\s*[\dIVXLCDM]+[:.]?\s*|\d+\.\d+\s*)", "", title, flags=re.IGNORECASE).strip()
+        if len(clean_title) > 8 and clean_title.lower() not in GENERIC_TITLES:
+            for page_idx, page_text in pages_content:
+                if clean_title.lower() in page_text.lower():
+                    return page_idx
+
+        return last_page_idx
 
 
 document_parser = DocumentParser()

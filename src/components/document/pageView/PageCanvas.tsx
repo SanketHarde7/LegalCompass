@@ -45,7 +45,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     const matches: { start: number; end: number; clause: Clause }[] = [];
 
     for (const clause of issueClauses) {
-      // Root cause G: Use backend-provided startOffset/endOffset directly if available
+      // Priority 1: Exact backend-provided startOffset/endOffset with validation
       if (
         clause.startOffset !== undefined &&
         clause.startOffset !== null &&
@@ -55,56 +55,47 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
         clause.endOffset > clause.startOffset &&
         clause.endOffset <= text.length
       ) {
-        matches.push({
-          start: clause.startOffset,
-          end: clause.endOffset,
-          clause,
-        });
-        continue;
+        const slice = text.slice(clause.startOffset, clause.endOffset);
+        const raw = (clause.originalText || '').trim();
+        const firstWord = raw.split(/\s+/)[0]?.toLowerCase() || '';
+
+        // Verify the slice actually resembles the clause source text
+        if (!firstWord || slice.toLowerCase().includes(firstWord)) {
+          matches.push({
+            start: clause.startOffset,
+            end: clause.endOffset,
+            clause,
+          });
+          continue;
+        }
       }
 
-      // Last-resort fallback: only for clauses missing offsets (e.g. from paragraph-windowing fallback)
-      if (!clause.originalText) continue;
+      // Priority 2: Safe normalized source match
+      if (clause.originalText) {
+        const raw = clause.originalText.trim();
+        if (raw.length >= 10) {
+          // Direct exact substring
+          const directIdx = text.indexOf(raw);
+          if (directIdx !== -1) {
+            matches.push({ start: directIdx, end: directIdx + raw.length, clause });
+            continue;
+          }
 
-      const raw = clause.originalText.trim();
-      let idx = text.indexOf(raw);
-      let matchLen = raw.length;
-
-      // Fallback searching if spacing or newlines had slight variations
-      if (idx === -1 && raw.length > 30) {
-        const startSnippet = raw.slice(0, 40).trim();
-        const startIdx = text.indexOf(startSnippet);
-        if (startIdx !== -1) {
-          const endSnippet = raw.slice(Math.max(0, raw.length - 30)).trim();
-          const endIdx = text.indexOf(endSnippet, startIdx);
-          if (endIdx !== -1) {
-            idx = startIdx;
-            // Cap matchLen strictly to the clause's own text length
-            matchLen = Math.min(raw.length, endIdx + endSnippet.length - startIdx);
-          } else {
-            idx = startIdx;
-            matchLen = Math.min(raw.length, text.length - startIdx);
+          // Distinctive first substantive line match
+          const firstLine = raw.split('\n')[0].trim();
+          if (firstLine.length >= 15) {
+            const firstIdx = text.indexOf(firstLine);
+            if (firstIdx !== -1) {
+              const matchLen = Math.min(raw.length, text.length - firstIdx);
+              matches.push({ start: firstIdx, end: firstIdx + matchLen, clause });
+              continue;
+            }
           }
         }
       }
 
-      // If still -1, try searching by first distinctive words
-      if (idx === -1 && raw.length > 20) {
-        const words = raw.split(/\s+/).filter(Boolean);
-        if (words.length >= 3) {
-          const firstThreeWords = words.slice(0, 3).join(' ');
-          const foundIdx = text.toLowerCase().indexOf(firstThreeWords.toLowerCase());
-          if (foundIdx !== -1) {
-            idx = foundIdx;
-            // Cap matchLen strictly to the clause's own text length
-            matchLen = Math.min(raw.length, text.length - foundIdx);
-          }
-        }
-      }
-
-      if (idx !== -1) {
-        matches.push({ start: idx, end: idx + matchLen, clause });
-      }
+      // Priority 3: No reliable location -> DO NOT HIGHLIGHT
+      // Unreliable 3-word fuzzy fallback has been completely removed to prevent false highlights.
     }
 
     if (matches.length === 0) {

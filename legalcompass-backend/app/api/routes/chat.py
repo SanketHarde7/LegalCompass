@@ -32,18 +32,26 @@ async def chat_copilot(request: ChatStreamRequest):
     if session:
         filename = session.filename
         overall_fairness = getattr(session, "overall_fairness_score", 50)
-        # If user explicitly selected a clause, guarantee it's in context
+        
+        # B & C: If user explicitly selected a clause, guarantee it's in context along with neighbors
         if request.selected_clause_id:
-            selected = next((c for c in session.clauses if c.id == request.selected_clause_id), None)
-            if selected:
-                context_clauses.append(selected)
+            all_s_clauses = session.clauses
+            selected_idx = next((i for i, c in enumerate(all_s_clauses) if c.id == request.selected_clause_id), None)
+            if selected_idx is not None:
+                context_clauses.append(all_s_clauses[selected_idx])
+                # Neighboring context (14.1, 14.3 when 14.2 selected)
+                if selected_idx > 0 and all_s_clauses[selected_idx - 1] not in context_clauses:
+                    context_clauses.append(all_s_clauses[selected_idx - 1])
+                if selected_idx + 1 < len(all_s_clauses) and all_s_clauses[selected_idx + 1] not in context_clauses:
+                    context_clauses.append(all_s_clauses[selected_idx + 1])
 
-        top_k = rag_engine.retrieve_top_k(session_id, query, k=4)
+        # RAG top-k retrieval (expanded to 7 to ensure later sections like termination, audit, IP are included)
+        top_k = rag_engine.retrieve_top_k(session_id, query, k=7)
         for c in top_k:
             if c not in context_clauses:
                 context_clauses.append(c)
     elif request.contract_context:
-        # Fallback to frontend contract context if backend was restarted or using preset
+        # Fallback to frontend contract context
         filename = request.contract_context.filename or filename
         overall_fairness = request.contract_context.overall_fairness_score or overall_fairness
         if request.contract_context.clauses:
@@ -65,7 +73,7 @@ async def chat_copilot(request: ChatStreamRequest):
                 )
                 if request.selected_clause_id and c_id == request.selected_clause_id:
                     context_clauses.insert(0, clause_obj)
-                elif len(context_clauses) < 4:
+                elif clause_obj not in context_clauses and len(context_clauses) < 10:
                     context_clauses.append(clause_obj)
     else:
         logger.info(f"No active RAG session found for {session_id}. Answering with generic legal context.")
