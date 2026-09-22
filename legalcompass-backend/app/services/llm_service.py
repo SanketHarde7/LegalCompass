@@ -56,30 +56,13 @@ class LLMService:
     # =========================================================================
     # Contract Analysis (JSON Mode)
     # =========================================================================
-    async def analyze_contract(
-        self,
-        raw_text: str,
-        filename: str,
-        initial_clauses: List[Clause],
-        pages_content: Optional[List[Tuple[int, str]]] = None,
-    ) -> ContractDocument:
-        """Analyzes full contract text, classifies risk levels, calculates fairness score."""
-        session_id = f"sess_{int(datetime.now(timezone.utc).timestamp())}_{abs(hash(filename)) % 10000}"
-        page_objects: List[PageContent] = []
-        if pages_content:
-            page_objects = [PageContent(pageNumber=idx, text=txt) for idx, txt in pages_content]
-
-        prompt = (
-            f"Contract Filename: {filename}\n\n"
-            f"Contract Raw Text:\n{raw_text[:18000]}\n\n"
-            "Analyze every key section and output strictly valid JSON according to your instructions."
-        )
-
+    async def _call_llm_json(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Invokes Gemini or Groq with JSON mode and returns parsed dictionary."""
         # 1. Try Gemini (Primary)
         gemini = self._get_gemini_client()
         if gemini:
             try:
-                logger.info(f"Analyzing contract via Gemini model: {settings.GEMINI_MODEL_ID}")
+                logger.info(f"Invoking Gemini model: {settings.GEMINI_MODEL_ID}")
                 response = gemini.models.generate_content(
                     model=settings.GEMINI_MODEL_ID,
                     contents=prompt,
@@ -91,18 +74,16 @@ class LLMService:
                 )
                 if response.text:
                     parsed = self._extract_json(response.text)
-                    if parsed and "clauses" in parsed:
-                        return self._build_document_from_json(
-                            session_id, filename, parsed, initial_clauses, page_objects
-                        )
+                    if parsed:
+                        return parsed
             except Exception as e:
-                logger.warning(f"Gemini analysis failed or quota exceeded: {e}. Failing over to Groq...")
+                logger.warning(f"Gemini call failed or quota exceeded: {e}. Failing over to Groq...")
 
         # 2. Try Groq (Failover)
         groq = self._get_groq_client()
         if groq:
             try:
-                logger.info(f"Analyzing contract via Groq model: {settings.GROQ_MODEL_ID}")
+                logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID}")
                 chat_completion = await groq.chat.completions.create(
                     messages=[
                         {"role": "system", "content": AUDITOR_PROMPT},
@@ -115,16 +96,99 @@ class LLMService:
                 raw_json = chat_completion.choices[0].message.content
                 if raw_json:
                     parsed = self._extract_json(raw_json)
-                    if parsed and "clauses" in parsed:
-                        return self._build_document_from_json(
-                            session_id, filename, parsed, initial_clauses, page_objects
-                        )
+                    if parsed:
+                        return parsed
             except Exception as e:
-                logger.warning(f"Groq analysis failed: {e}. Using deterministic heuristic legal engine...")
+                logger.warning(f"Groq call failed: {e}.")
+
+        return None
+
+    async def analyze_contract(
+        self,
+        raw_text: str,
+        filename: str,
+        initial_clauses: List[Clause],
+        pages_content: Optional[List[Tuple[int, str]]] = None,
+        document_title: Optional[str] = None,
+    ) -> ContractDocument:
+        """Analyzes structured contract clauses, classifies risk levels, calculates fairness score."""
+        session_id = f"sess_{int(datetime.now(timezone.utc).timestamp())}_{abs(hash(filename)) % 10000}"
+        page_objects: List[PageContent] = []
+        if pages_content:
+            page_objects = [PageContent(pageNumber=idx, text=txt) for idx, txt in pages_content]
+
+        if not initial_clauses:
+            logger.info("No initial clauses found to analyze.")
+            return self._heuristic_analysis(session_id, filename, initial_clauses, page_objects, document_title)
+
+        # -------------------------------------------------------------------------
+        # Root cause F: Split initial_clauses into sequential batches (~6,000 chars per batch).
+        # Ensures full coverage without hitting model context limits or dropping trailing sections.
+        # -------------------------------------------------------------------------
+        batches: List[List[Clause]] = []
+        current_batch: List[Clause] = []
+        current_chars = 0
+
+        for c in initial_clauses:
+            clause_len = len(c.title or "") + len(c.text or "")
+            if current_chars + clause_len > 6000 and current_batch:
+                batches.append(current_batch)
+                current_batch = [c]
+                current_chars = clause_len
+            else:
+                current_batch.append(c)
+                current_chars += clause_len
+
+        if current_batch:
+            batches.append(current_batch)
+
+        all_evaluated_clauses: List[Dict[str, Any]] = []
+        fairness_scores: List[int] = []
+        overview_snippets: List[str] = []
+        total_batches = len(batches)
+
+        for batch_idx, batch in enumerate(batches):
+            # Root cause E: Send ALREADY-PARSED initial_clauses as structured JSON payload
+            structured_clauses = [
+                {"clause_id": c.id, "title": c.title, "text": c.text}
+                for c in batch
+            ]
+            batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
+            prompt = (
+                f"Contract Filename: {filename}\n"
+                f"Document Title: {document_title or 'N/A'}\n\n"
+                f"Input Clauses to Audit{batch_header}:\n"
+                f"{json.dumps(structured_clauses, indent=2)}\n\n"
+                "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
+            )
+
+            batch_res = await self._call_llm_json(prompt)
+            if batch_res and "clauses" in batch_res:
+                for cd in batch_res.get("clauses", []):
+                    all_evaluated_clauses.append(cd)
+                if "overall_fairness_score" in batch_res:
+                    try:
+                        fairness_scores.append(int(batch_res["overall_fairness_score"]))
+                    except (ValueError, TypeError):
+                        pass
+                if "summary_overview" in batch_res and batch_res["summary_overview"]:
+                    overview_snippets.append(str(batch_res["summary_overview"]).strip())
+
+        if all_evaluated_clauses:
+            avg_score = round(sum(fairness_scores) / len(fairness_scores)) if fairness_scores else 50
+            merged_overview = " ".join(overview_snippets) if overview_snippets else f"Analyzed {len(initial_clauses)} clauses across {len(page_objects)} pages."
+            merged_data = {
+                "overall_fairness_score": avg_score,
+                "summary_overview": merged_overview,
+                "clauses": all_evaluated_clauses,
+            }
+            return self._build_document_from_json(
+                session_id, filename, merged_data, initial_clauses, page_objects, document_title
+            )
 
         # 3. Fallback: Heuristic Legal Auditor
         logger.info("Using deterministic heuristic legal rules engine for contract analysis.")
-        return self._heuristic_analysis(session_id, filename, initial_clauses, page_objects)
+        return self._heuristic_analysis(session_id, filename, initial_clauses, page_objects, document_title)
 
     # =========================================================================
     # Streaming Chat Copilot (SSE)
@@ -354,51 +418,51 @@ class LLMService:
         data: Dict[str, Any],
         initial_clauses: List[Clause],
         page_objects: List[PageContent],
+        document_title: Optional[str] = None,
     ) -> ContractDocument:
         score = int(data.get("overall_fairness_score", 50))
         clauses_data = data.get("clauses", [])
 
-        # Index LLM clauses by normalized title or keywords
+        # Root cause E: Index LLM evaluations strictly by clause_id
         llm_map: Dict[str, Dict[str, Any]] = {}
         for cd in clauses_data:
-            title_key = cd.get("title", "").strip().lower()
-            if title_key:
-                llm_map[title_key] = cd
+            cid = cd.get("clause_id")
+            if cid:
+                llm_map[str(cid).strip()] = cd
 
         analyzed_clauses: List[Clause] = []
         if initial_clauses:
             for idx, orig_clause in enumerate(initial_clauses, start=1):
-                # Try finding matching LLM evaluation
-                matched_cd = None
-                orig_title_lower = orig_clause.title.lower()
-                for k, cd in llm_map.items():
-                    if k in orig_title_lower or orig_title_lower in k:
-                        matched_cd = cd
-                        break
+                # Root cause E: Match strictly on returned clause_id against original clause_id
+                matched_cd = llm_map.get(orig_clause.id)
 
-                if not matched_cd and idx - 1 < len(clauses_data):
-                    matched_cd = clauses_data[idx - 1]
+                # Root cause D: Deleted positional fallback `if not matched_cd and idx - 1 < len(clauses_data)`.
+                # Never map by array position!
 
                 if matched_cd:
                     analyzed_clauses.append(
                         Clause(
-                            id=f"clause_{idx}",
-                            index=idx,
+                            id=orig_clause.id,
+                            index=orig_clause.index or idx,
                             title=orig_clause.title,
                             text=orig_clause.text,
                             category=matched_cd.get("category", orig_clause.category or "OTHER"),
-                            riskLevel=matched_cd.get("risk_level", "MEDIUM"),
+                            riskLevel=matched_cd.get("risk_level", "LOW"),
                             plainSummary=matched_cd.get("plain_english_summary", ""),
                             suggestion=matched_cd.get("suggested_pushback"),
-                            unfairnessScore=int(matched_cd.get("unfairness_score", 45)),
+                            unfairnessScore=int(matched_cd.get("unfairness_score", 20)),
                             pageNumber=orig_clause.page_number or 1,
+                            startOffset=orig_clause.start_offset,
+                            endOffset=orig_clause.end_offset,
                         )
                     )
                 else:
+                    # Root cause E: If no match exists for a given original clause, keep it in the deterministic
+                    # LOW/NEUTRAL fallback branch (do not guess).
                     analyzed_clauses.append(
                         Clause(
-                            id=f"clause_{idx}",
-                            index=idx,
+                            id=orig_clause.id,
+                            index=orig_clause.index or idx,
                             title=orig_clause.title,
                             text=orig_clause.text,
                             category=orig_clause.category or "OTHER",
@@ -407,13 +471,16 @@ class LLMService:
                             suggestion=None,
                             unfairnessScore=orig_clause.unfairness_score or 20,
                             pageNumber=orig_clause.page_number or 1,
+                            startOffset=orig_clause.start_offset,
+                            endOffset=orig_clause.end_offset,
                         )
                     )
         else:
             for i, cd in enumerate(clauses_data, start=1):
+                cid = cd.get("clause_id") or f"clause_{i}"
                 analyzed_clauses.append(
                     Clause(
-                        id=f"clause_{i}",
+                        id=cid,
                         index=i,
                         title=cd.get("title", f"Clause {i}"),
                         text=cd.get("text", ""),
@@ -438,6 +505,7 @@ class LLMService:
             totalPages=total_pages,
             pages=page_objects,
             clauses=analyzed_clauses,
+            documentTitle=document_title,
         )
 
     def _heuristic_analysis(
@@ -446,6 +514,7 @@ class LLMService:
         filename: str,
         initial_clauses: List[Clause],
         page_objects: List[PageContent],
+        document_title: Optional[str] = None,
     ) -> ContractDocument:
         """Deterministic rule-based auditor detecting high-risk terms via keywords."""
         evaluated_clauses: List[Clause] = []
@@ -503,8 +572,8 @@ class LLMService:
 
             evaluated_clauses.append(
                 Clause(
-                    id=f"clause_{idx}",
-                    index=idx,
+                    id=clause.id,
+                    index=clause.index or idx,
                     title=clause.title,
                     text=clause.text,
                     category=category,
@@ -513,6 +582,8 @@ class LLMService:
                     suggestion=suggestion,
                     unfairnessScore=score,
                     pageNumber=clause.page_number or 1,
+                    startOffset=clause.start_offset,
+                    endOffset=clause.end_offset,
                 )
             )
 
@@ -529,6 +600,7 @@ class LLMService:
             totalPages=total_pages,
             pages=page_objects,
             clauses=evaluated_clauses,
+            documentTitle=document_title,
         )
 
     async def _heuristic_stream(self, query: str, context: List[Clause]) -> AsyncGenerator[str, None]:

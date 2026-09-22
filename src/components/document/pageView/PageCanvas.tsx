@@ -45,6 +45,25 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     const matches: { start: number; end: number; clause: Clause }[] = [];
 
     for (const clause of issueClauses) {
+      // Root cause G: Use backend-provided startOffset/endOffset directly if available
+      if (
+        clause.startOffset !== undefined &&
+        clause.startOffset !== null &&
+        clause.endOffset !== undefined &&
+        clause.endOffset !== null &&
+        clause.startOffset >= 0 &&
+        clause.endOffset > clause.startOffset &&
+        clause.endOffset <= text.length
+      ) {
+        matches.push({
+          start: clause.startOffset,
+          end: clause.endOffset,
+          clause,
+        });
+        continue;
+      }
+
+      // Last-resort fallback: only for clauses missing offsets (e.g. from paragraph-windowing fallback)
       if (!clause.originalText) continue;
 
       const raw = clause.originalText.trim();
@@ -60,7 +79,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           const endIdx = text.indexOf(endSnippet, startIdx);
           if (endIdx !== -1) {
             idx = startIdx;
-            matchLen = endIdx + endSnippet.length - startIdx;
+            // Cap matchLen strictly to the clause's own text length
+            matchLen = Math.min(raw.length, endIdx + endSnippet.length - startIdx);
           } else {
             idx = startIdx;
             matchLen = Math.min(raw.length, text.length - startIdx);
@@ -76,6 +96,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           const foundIdx = text.toLowerCase().indexOf(firstThreeWords.toLowerCase());
           if (foundIdx !== -1) {
             idx = foundIdx;
+            // Cap matchLen strictly to the clause's own text length
             matchLen = Math.min(raw.length, text.length - foundIdx);
           }
         }

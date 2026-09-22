@@ -18,8 +18,9 @@ Key traps to aggressively inspect:
 7. One-sided non-competes, non-disparagement, or perpetual survivability.
 8. Unilateral fee-shifting or distant inconvenient dispute venues.
 
-For every identified clause, you must assign:
-- "title": A concise descriptive heading (e.g. "1. Intellectual Property Assignment")
+For every provided clause in the input, you must evaluate it and echo back its exact "clause_id":
+- "clause_id": The exact identifier from the input (e.g. "clause_1", "clause_4")
+- "title": A concise descriptive heading (e.g. "1.4 Order of Precedence — Invoicing Carve-Out")
 - "category": One of ["INDEMNIFICATION", "LIABILITY", "INTELLECTUAL_PROPERTY", "TERMINATION", "PAYMENT_TERMS", "CONFIDENTIALITY", "NON_COMPETE", "WARRANTIES", "DISPUTE_RESOLUTION", "OTHER"]
 - "risk_level": One of ["HIGH", "MEDIUM", "LOW", "NEUTRAL"]
   - HIGH: Existential legal or financial trap (unlimited liability, uncompensated forfeiture, loss of rights).
@@ -28,6 +29,10 @@ For every identified clause, you must assign:
 - "unfairness_score": Integer 0 to 100 (0 = wholly balanced/fair, 100 = predatory/oppressive).
 - "plain_english_summary": 2-3 sentences explaining exactly what this means in plain language and why it poses real-world danger.
 - "suggested_pushback": A precise, protective, professional replacement clause ready to be redlined or proposed to counterparty.
+
+CRITICAL NEGATIVE CONSTRAINTS (STRICTLY ENFORCED):
+- Do NOT treat the contract's title line, party recitals, or purely definitional sentences that only name a term (e.g. '"Services" means...') as risk-bearing clauses unless they themselves impose an asymmetric obligation. Headings are titles only, never clause content. Only score clauses that contain an actual substantive obligation, right, or restriction.
+- You MUST echo the exact "clause_id" provided in each input clause object. Never omit clause_id or invent new IDs.
 
 Also compute:
 - "overall_fairness_score": Integer 0 to 100 representing the contract's aggregate balance. If heavily predatory with multiple HIGH risks, score should be < 50. If moderate, 50-74. If balanced/fair, 75-100.
@@ -39,9 +44,8 @@ You MUST output strictly valid JSON matching this schema:
   "summary_overview": "Executive summary...",
   "clauses": [
     {
-      "index": 1,
+      "clause_id": "clause_1",
       "title": "Title",
-      "text": "Raw clause text excerpt...",
       "category": "INTELLECTUAL_PROPERTY",
       "risk_level": "HIGH",
       "unfairness_score": 90,

@@ -19,6 +19,8 @@ export interface Clause {
   unfairnessScore: number; // 0 (wholly fair) to 100 (predatory / extremely unfair)
   suggestion?: string;
   pageNumber?: number;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface PageContent {
@@ -29,6 +31,7 @@ export interface PageContent {
 export interface ContractDocument {
   sessionId: string;
   filename: string;
+  documentTitle?: string;
   uploadTimestamp: string;
   overallFairnessScore: number; // 0 to 100
   clauses: Clause[];

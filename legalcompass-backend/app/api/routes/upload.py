@@ -119,6 +119,7 @@ async def upload_contract(
             filename=filename,
             initial_clauses=initial_clauses,
             pages_content=pages_content,
+            document_title=document_parser.document_title,
         )
     except Exception as e:
         logger.error(f"LLM contract analysis failed: {e}")
@@ -126,7 +127,9 @@ async def upload_contract(
         session_id = f"sess_{int(file_size)}_{abs(hash(filename)) % 1000}"
         from app.schemas.contract import PageContent
         page_objects = [PageContent(pageNumber=idx, text=txt) for idx, txt in pages_content]
-        analyzed_doc = llm_service._heuristic_analysis(session_id, filename, initial_clauses, page_objects)
+        analyzed_doc = llm_service._heuristic_analysis(
+            session_id, filename, initial_clauses, page_objects, document_title=document_parser.document_title
+        )
 
     # 5. Index Clauses in FastEmbed in-memory RAG
     try:
@@ -152,6 +155,8 @@ async def upload_contract(
         total_pages=analyzed_doc.total_pages,
         totalPages=analyzed_doc.total_pages,
         pages=analyzed_doc.pages,
+        document_title=analyzed_doc.document_title,
+        documentTitle=analyzed_doc.document_title,
         summary_overview=(
             f"Analyzed {len(analyzed_doc.clauses)} clauses across {analyzed_doc.total_pages} pages. Overall fairness score is "
             f"{analyzed_doc.overall_fairness_score}/100."

@@ -42,6 +42,12 @@ class Clause(BaseModel):
     page_number: Optional[int] = Field(
         default=1, alias="pageNumber", description="Page number in source PDF if applicable"
     )
+    start_offset: Optional[int] = Field(
+        default=None, alias="startOffset", description="Character start offset in the page text"
+    )
+    end_offset: Optional[int] = Field(
+        default=None, alias="endOffset", description="Character end offset in the page text"
+    )
 
     @property
     def originalText(self) -> str:
@@ -67,6 +73,14 @@ class Clause(BaseModel):
     def pageNumber(self) -> Optional[int]:
         return self.page_number
 
+    @property
+    def startOffset(self) -> Optional[int]:
+        return self.start_offset
+
+    @property
+    def endOffset(self) -> Optional[int]:
+        return self.end_offset
+
 
 class PageContent(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -84,6 +98,7 @@ class ContractDocument(BaseModel):
 
     session_id: str = Field(alias="sessionId", description="Session UUID")
     filename: str = Field(description="Original filename uploaded")
+    document_title: Optional[str] = Field(default=None, alias="documentTitle", description="Extracted document title")
     upload_timestamp: str = Field(alias="uploadTimestamp", description="ISO 8601 timestamp")
     overall_fairness_score: int = Field(
         alias="overallFairnessScore", description="Overall fairness score 0 to 100"
@@ -108,12 +123,17 @@ class ContractDocument(BaseModel):
     def totalPages(self) -> int:
         return self.total_pages
 
+    @property
+    def documentTitle(self) -> Optional[str]:
+        return self.document_title
+
 
 class UploadContractResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     session_id: str = Field(alias="sessionId", description="UUID identifying the analysis session")
     filename: str = Field(description="Original filename uploaded")
+    document_title: Optional[str] = Field(default=None, alias="documentTitle", description="Extracted document title")
     file_size_bytes: int = Field(default=0, description="Size in bytes")
     uploaded_at: str = Field(alias="uploadTimestamp", description="ISO 8601 timestamp")
     total_clauses: int = Field(default=0, description="Count of identified clauses")
