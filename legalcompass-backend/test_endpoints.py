@@ -59,7 +59,14 @@ def run_tests():
     assert session_id is not None
     assert len(clauses) >= 1
     assert fairness_score is not None
-    print(" [PASS] Real PDF upload and pdfplumber extraction verified!")
+
+    for c in clauses:
+        has_start = "start_offset" in c or "startOffset" in c
+        has_end = "end_offset" in c or "endOffset" in c
+        has_page = "page_number" in c or "pageNumber" in c
+        assert has_start and has_end and has_page, f"Clause {c.get('id')} missing offset metadata"
+    print(" -> Verified: All clauses contain start_offset, end_offset, and page_number metadata in API JSON")
+    print(" [PASS] Real PDF upload, pdfplumber extraction, and offset serialization verified!")
 
     # 3. Chat Endpoint (SSE)
     print("\n[3/5] Testing POST /api/chat (SSE Stream) ...")

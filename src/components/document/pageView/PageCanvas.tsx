@@ -2,6 +2,7 @@ import React from 'react';
 import type { Clause } from '../../../types/contract';
 import { useAppStore } from '../../../store/useAppStore';
 import { Scale } from 'lucide-react';
+import { resolveClauseHighlightSpan } from './pageCanvasHelpers';
 
 export interface PageCanvasProps {
   clauses: Clause[];
@@ -45,57 +46,14 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     const matches: { start: number; end: number; clause: Clause }[] = [];
 
     for (const clause of issueClauses) {
-      // Priority 1: Exact backend-provided startOffset/endOffset with validation
-      if (
-        clause.startOffset !== undefined &&
-        clause.startOffset !== null &&
-        clause.endOffset !== undefined &&
-        clause.endOffset !== null &&
-        clause.startOffset >= 0 &&
-        clause.endOffset > clause.startOffset &&
-        clause.endOffset <= text.length
-      ) {
-        const slice = text.slice(clause.startOffset, clause.endOffset);
-        const raw = (clause.originalText || '').trim();
-        const firstWord = raw.split(/\s+/)[0]?.toLowerCase() || '';
-
-        // Verify the slice actually resembles the clause source text
-        if (!firstWord || slice.toLowerCase().includes(firstWord)) {
-          matches.push({
-            start: clause.startOffset,
-            end: clause.endOffset,
-            clause,
-          });
-          continue;
-        }
+      const span = resolveClauseHighlightSpan(clause, text);
+      if (span) {
+        matches.push({
+          start: span.start,
+          end: span.end,
+          clause,
+        });
       }
-
-      // Priority 2: Safe normalized source match
-      if (clause.originalText) {
-        const raw = clause.originalText.trim();
-        if (raw.length >= 10) {
-          // Direct exact substring
-          const directIdx = text.indexOf(raw);
-          if (directIdx !== -1) {
-            matches.push({ start: directIdx, end: directIdx + raw.length, clause });
-            continue;
-          }
-
-          // Distinctive first substantive line match
-          const firstLine = raw.split('\n')[0].trim();
-          if (firstLine.length >= 15) {
-            const firstIdx = text.indexOf(firstLine);
-            if (firstIdx !== -1) {
-              const matchLen = Math.min(raw.length, text.length - firstIdx);
-              matches.push({ start: firstIdx, end: firstIdx + matchLen, clause });
-              continue;
-            }
-          }
-        }
-      }
-
-      // Priority 3: No reliable location -> DO NOT HIGHLIGHT
-      // Unreliable 3-word fuzzy fallback has been completely removed to prevent false highlights.
     }
 
     if (matches.length === 0) {

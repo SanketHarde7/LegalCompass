@@ -4,8 +4,11 @@ import type { ChatMessage } from '../types/chat';
 import { mockContractDocument } from './mockData';
 import { mockAirtightDocument } from './airtightData';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
-const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
+const API_BASE_URL =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
+  'http://localhost:8000/api';
+const USE_MOCK =
+  typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_USE_MOCK === 'true';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -81,6 +84,60 @@ function showFallbackToast(msg: string) {
 }
 
 /**
+ * Maps raw backend clause payload (supporting snake_case & camelCase) into frontend Clause model.
+ * Preserves character offsets (startOffset, endOffset) and pageNumber.
+ */
+export function mapBackendClause(c: any, idx: number = 0): Clause {
+  return {
+    id: c.id || `clause_${idx + 1}`,
+    title: c.title || `Clause ${idx + 1}`,
+    originalText: c.text || c.originalText || '',
+    plainSummary: c.plain_english_summary || c.plainSummary || 'Clause analyzed by LegalCompass.',
+    riskLevel: normalizeRiskLevel(c.risk_level || c.riskLevel),
+    category: normalizeCategory(c.category),
+    unfairnessScore: c.unfairness_score ?? c.unfairnessScore ?? 40,
+    suggestion: c.suggested_pushback || c.suggestion || undefined,
+    pageNumber: c.page_number ?? c.pageNumber ?? 1,
+    startOffset: c.start_offset ?? c.startOffset ?? undefined,
+    endOffset: c.end_offset ?? c.endOffset ?? undefined,
+  };
+}
+
+/**
+ * Maps raw backend upload response into complete frontend ContractDocument.
+ * Preserves documentTitle, pages, and structured clauses with source offsets.
+ */
+export function mapBackendContractDocument(
+  resData: any,
+  fallbackFilename: string = 'contract.pdf'
+): ContractDocument {
+  const rawClauses = resData.clauses || resData.document?.clauses || [];
+  const mappedClauses: Clause[] = rawClauses.map((c: any, idx: number) => mapBackendClause(c, idx));
+
+  const rawPages = resData.pages || resData.document?.pages || [];
+  const mappedPages = rawPages.map((p: any) => ({
+    pageNumber: p.pageNumber || p.page_number || 1,
+    text: p.text || '',
+  }));
+
+  const totalPages =
+    resData.totalPages ||
+    resData.total_pages ||
+    (mappedPages.length > 0 ? mappedPages.length : 1);
+
+  return {
+    sessionId: resData.session_id || resData.sessionId || `sess_${Date.now()}`,
+    filename: resData.filename || fallbackFilename,
+    documentTitle: resData.document_title ?? resData.documentTitle ?? undefined,
+    uploadTimestamp: resData.uploaded_at || resData.uploadTimestamp || new Date().toISOString(),
+    overallFairnessScore: resData.overall_fairness_score ?? resData.overallFairnessScore ?? 50,
+    totalPages,
+    pages: mappedPages,
+    clauses: mappedClauses,
+  };
+}
+
+/**
  * Uploads a contract document (PDF/DOCX) for parsing and risk evaluation.
  * Returns the structured ContractDocument.
  */
@@ -118,40 +175,7 @@ export async function uploadContract(file: File): Promise<ContractDocument> {
     });
 
     const resData = response.data;
-    const rawClauses = resData.clauses || resData.document?.clauses || [];
-
-    const mappedClauses: Clause[] = rawClauses.map((c: any, idx: number) => ({
-      id: c.id || `clause_${idx + 1}`,
-      title: c.title || `Clause ${idx + 1}`,
-      originalText: c.text || c.originalText || '',
-      plainSummary: c.plain_english_summary || c.plainSummary || 'Clause analyzed by LegalCompass.',
-      riskLevel: normalizeRiskLevel(c.risk_level || c.riskLevel),
-      category: normalizeCategory(c.category),
-      unfairnessScore: c.unfairness_score ?? c.unfairnessScore ?? 40,
-      suggestion: c.suggested_pushback || c.suggestion || undefined,
-      pageNumber: c.page_number || c.pageNumber || 1,
-    }));
-
-    const rawPages = resData.pages || resData.document?.pages || [];
-    const mappedPages = rawPages.map((p: any) => ({
-      pageNumber: p.pageNumber || p.page_number || 1,
-      text: p.text || '',
-    }));
-
-    const totalPages =
-      resData.totalPages ||
-      resData.total_pages ||
-      (mappedPages.length > 0 ? mappedPages.length : 1);
-
-    return {
-      sessionId: resData.session_id || resData.sessionId || `sess_${Date.now()}`,
-      filename: resData.filename || file.name,
-      uploadTimestamp: resData.uploaded_at || resData.uploadTimestamp || new Date().toISOString(),
-      overallFairnessScore: resData.overall_fairness_score ?? resData.overallFairnessScore ?? 50,
-      totalPages,
-      pages: mappedPages,
-      clauses: mappedClauses,
-    };
+    return mapBackendContractDocument(resData, file.name);
   } catch (err: any) {
     // If backend rejected with validation or out-of-domain error
     if (err.response?.data?.detail) {
