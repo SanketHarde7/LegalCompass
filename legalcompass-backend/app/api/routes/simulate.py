@@ -1,0 +1,40 @@
+from fastapi import APIRouter, HTTPException, status
+from app.schemas.simulate import SimulateScenarioRequest, ScenarioSimulationResult
+from app.services.rag_engine import rag_engine
+from app.services.llm_service import llm_service
+from app.schemas.contract import Clause
+from typing import List
+
+router = APIRouter()
+
+
+@router.post(
+    "/simulate-scenario",
+    response_model=ScenarioSimulationResult,
+    summary="Runs deterministic What-If scenario simulation against active contract",
+)
+async def simulate_scenario(request: SimulateScenarioRequest):
+    """Evaluates hypothetical real-world triggers against active contract clauses."""
+    session_id = request.session_id
+    prompt = request.scenario_prompt.strip()
+
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_INPUT", "message": "Scenario prompt cannot be empty."},
+        )
+
+    # 1. Retrieve RAG context
+    session = rag_engine.get_session(session_id)
+    context_clauses: List[Clause] = []
+    if session:
+        context_clauses = rag_engine.retrieve_top_k(session_id, prompt, k=4)
+
+    # 2. Run simulation
+    result = await llm_service.simulate_scenario(
+        session_id=session_id,
+        prompt=prompt,
+        context_clauses=context_clauses,
+    )
+
+    return result

@@ -1,0 +1,49 @@
+INDEPENDENT CONTRACTOR MASTER SERVICES AGREEMENT (MSA)
+Reference ID: MSA-2026-APX-9941
+Effective Date: March 15, 2026
+Governing Jurisdiction: Dover, State of Delaware, USA
+
+PARTIES:
+1. APEX SYSTEMS & ENTERPRISE MEDIA LLC, a Delaware Limited Liability Company with principal offices at 1209 Orange St, Wilmington, DE ("Client").
+2. THE UNDERSIGNED INDEPENDENT CONTRACTOR / DEVELOPER ("Contractor").
+
+The parties agree to the following terms and conditions:
+
+SECTION 1: SCOPE OF SERVICES & UNILATERAL MODIFICATIONS
+1.1 Engagement: Contractor shall provide software engineering, technical architecture, and implementation services as specified in periodic Statements of Work (SOW).
+1.2 Unilateral Scope Adjustments: Client reserves the unrestricted right to modify, expand, or adjust project deliverables, milestones, and deadlines at any stage without adjustment to agreed compensation. Contractor shall absorb any additional hours required to fulfill revised requirements without asserting breach of contract.
+
+SECTION 2: COMPENSATION, NET-90 PAYMENT & DISCRETIONARY WITHHOLDING
+2.1 Payment Schedule: All submitted invoices are subject to Net-90 payment terms from the date of final formal acceptance by Client.
+2.2 Subjective Acceptance & Withholding: Client retains sole, subjective discretion to determine whether deliverables meet "industry standards." If Client deems any milestone unsatisfactory for any reason, Client may withhold up to 100% of the invoice balance indefinitely without incurring interest or late penalties.
+2.3 Payment Forfeiture: If this Agreement is terminated before an active SOW is 100% delivered and approved, Contractor forfeits all claims to unbilled hours, work-in-progress, and unapproved milestones.
+
+SECTION 3: INTELLECTUAL PROPERTY ASSIGNMENT & PRE-EXISTING CODE TRAP
+3.1 Automatic Transfer Upon Creation: Contractor irrevocably grants, assigns, and transfers to Client all worldwide right, title, and ownership in all code, repositories, architectures, algorithms, documentation, and inventions conceived or created during the contract period.
+3.2 Independence from Payment: Transfer of ownership occurs instantly upon creation of the work product, regardless of whether Client has paid, rejected, or disputed corresponding invoices. Contractor retains zero lien, licensing right, or right to withhold code.
+3.3 Pre-Existing Code & Moral Rights: Contractor waives all moral rights and assigns to Client all rights to any personal libraries, open-source utilities, or pre-existing boilerplates incorporated into deliverables, barring Contractor from reusing said code in future third-party projects.
+
+SECTION 4: TERMINATION FOR CONVENIENCE & RESIGNATION PENALTIES
+4.1 Client Termination: Client may terminate this Agreement or any active SOW immediately at any time, for any reason or no reason, via email notice with zero days cure period and zero severance or wind-down compensation.
+4.2 Contractor Resignation & Liquidated Damages: Contractor may not terminate or resign without giving a mandatory ninety (90) days advance written notice. If Contractor stops work prior to 90 days, Contractor agrees to pay Client a liquidated penalty of $15,000 USD to cover replacement onboarding costs.
+
+SECTION 5: UNLIMITED INDEMNIFICATION & UNCAPPED PERSONAL LIABILITY
+5.1 Contractor Indemnification: Contractor agrees to defend, indemnify, and hold harmless Client, its parent companies, officers, and clients from any liabilities, third-party claims, lawsuits, data loss, security breaches, or attorney fees arising out of or related to deliverables provided under this Agreement.
+5.2 Uncapped Liability: Contractor's personal financial liability under this Agreement is completely uncapped and shall not be subject to any limitations on direct, indirect, incidental, or consequential damages.
+5.3 Client Limitation of Liability: Client's maximum cumulative aggregate liability to Contractor under any circumstances shall not exceed $100 USD.
+
+SECTION 6: NON-COMPETE, NON-SOLICITATION & CLIENT RESTRAINT
+6.1 Restrictive Covenant: For a period of twenty-four (24) months following contract termination, Contractor shall not directly or indirectly provide software development or consulting services to any entity operating in the same industry as Client, anywhere worldwide.
+6.2 Breach Penalty: Breach of this Section triggers immediate injunctive relief and an agreed liquidated damages sum of $25,000 USD per violation.
+
+SECTION 7: WARRANTIES & DEFECT RECTIFICATION
+7.1 Strict Guarantee: Contractor warrants that all delivered software will remain 100% bug-free, secure, and fully operational for thirty-six (36) months post-deployment.
+7.2 Mandatory Unpaid Maintenance: Contractor shall remedy any reported bug, performance drop, or security flaw within 24 hours of notice, free of charge, regardless of whether the issue stems from third-party hosting, API deprecation, or Client infrastructure modifications.
+
+SECTION 8: DISPUTE RESOLUTION & LEGAL EXPENSES
+8.1 Mandatory Arbitration: Any dispute or claim shall be settled via private, binding arbitration administered in Dover, Delaware.
+8.2 Cost Allocation: Regardless of prevailing party status or arbitration outcome, Contractor shall bear all personal travel costs and pay fifty percent (50%) of all administrative arbitration filing fees and arbitrator retainers. Contractor waives all rights to join class action proceedings.
+
+SIGNATURES:
+For Client: Apex Systems & Enterprise Media LLC
+For Contractor: [Authorized Signature / Full Name]
