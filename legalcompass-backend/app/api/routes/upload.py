@@ -137,6 +137,7 @@ async def upload_contract(
             session_id=analyzed_doc.session_id,
             filename=filename,
             clauses=analyzed_doc.clauses,
+            overall_fairness_score=analyzed_doc.overall_fairness_score,
         )
     except Exception as e:
         logger.warning(f"Failed to index document in RAG engine: {e}")

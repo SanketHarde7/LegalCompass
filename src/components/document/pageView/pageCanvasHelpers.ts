@@ -36,8 +36,9 @@ export function normalizeWithMapping(text: string): { normalized: string; mappin
 }
 
 /**
- * Verifies that a text slice from the page plausibly matches the clause text.
- * Uses normalized comparison to be tolerant of whitespace/newline variations.
+ * Verifies that a text slice from the page matches the clause text.
+ * Requires exact normalized source equivalence (tolerates spacing/newlines,
+ * but strictly rejects word substitutions, prefixes, or partial overlaps).
  */
 export function isPlausiblyMatching(pageSlice: string, clauseText: string): boolean {
   if (!pageSlice || !clauseText) return false;
@@ -47,29 +48,8 @@ export function isPlausiblyMatching(pageSlice: string, clauseText: string): bool
 
   if (normSlice.length === 0 || normClause.length === 0) return false;
 
-  // 1. Direct normalized equality
-  if (normSlice === normClause) return true;
-
-  // 2. Either starts with the other (e.g. multi-page clause truncated at page break or header inclusion)
-  const minLen = Math.min(normSlice.length, normClause.length);
-  const sampleLen = Math.min(minLen, 50);
-
-  if (sampleLen >= 15) {
-    const slicePrefix = normSlice.slice(0, sampleLen);
-    const clausePrefix = normClause.slice(0, sampleLen);
-    if (slicePrefix === clausePrefix) return true;
-  }
-
-  // 3. Significant word overlap for legal covenant bodies
-  const sliceWords = normSlice.split(' ').filter((w) => w.length > 3);
-  const clauseWords = normClause.split(' ').filter((w) => w.length > 3);
-  if (sliceWords.length >= 3 && clauseWords.length >= 3) {
-    const commonWords = sliceWords.filter((w) => clauseWords.includes(w));
-    const overlapRatio = commonWords.length / Math.min(sliceWords.length, clauseWords.length);
-    if (overlapRatio >= 0.7) return true;
-  }
-
-  return false;
+  // Exact normalized source equivalence only
+  return normSlice === normClause;
 }
 
 /**

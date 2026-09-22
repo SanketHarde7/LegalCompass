@@ -137,6 +137,13 @@ def test_fix_2_page_mapping_and_offsets():
     assert 0 <= start_off < end_off <= len(pdf_altered_page)
     print("  [PASS] 3. Offsets strictly bounded by page length.")
 
+    # Test 4: Multi-page / partial clause returns (None, None) (no fabricated partial offset)
+    page_with_half_clause = "Page 1 Content.\nContractor shall indemnify Client against all losses and"
+    full_multipage_clause = "Contractor shall indemnify Client against all losses and liabilities arising under this Agreement in accordance with Section 8."
+    start_multi, end_multi = document_parser._find_offsets_in_page(full_multipage_clause, page_with_half_clause)
+    assert start_multi is None and end_multi is None, f"Expected (None, None) for multi-page clause, got ({start_multi}, {end_multi})"
+    print("  [PASS] 4. Multi-page clause without full match correctly produces (None, None); zero fabricated offsets.")
+
 
 def test_fix_3_fairness_score_calculation():
     print("\n--- [FIX 3] Testing Authoritative Overall Fairness Calculation ---")
@@ -233,6 +240,25 @@ def test_fix_4_copilot_context_retrieval():
     for cid in citation_ids:
         assert any(c.id == cid for c in context_clauses), f"Citation {cid} not in context!"
     print(f"  [PASS] 3. Citation integrity confirmed: {citation_ids} all exist in context.")
+
+    # 4. Chat session fairness preservation
+    test_session_id = "test_fairness_session"
+    rag_engine.index_document(test_session_id, "TestAgreement.pdf", all_clauses, overall_fairness_score=33)
+    retrieved_session = rag_engine.get_session(test_session_id)
+    assert retrieved_session is not None
+    assert retrieved_session.overall_fairness_score == 33, f"Expected 33, got {retrieved_session.overall_fairness_score}"
+    print("  [PASS] 4. SessionIndex correctly stores and preserves overall_fairness_score (33).")
+
+    # 5. chat.py import & runtime test
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    chat_res = client.post(
+        "/api/chat",
+        json={"sessionId": test_session_id, "message": "What is the fairness score of this contract?", "history": []},
+    )
+    assert chat_res.status_code == 200, f"Chat endpoint failed with status {chat_res.status_code}"
+    print("  [PASS] 5. chat.py route imported and verified with real session fairness.")
 
 
 if __name__ == "__main__":

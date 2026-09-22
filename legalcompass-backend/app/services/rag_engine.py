@@ -13,10 +13,18 @@ logger = logging.getLogger(__name__)
 
 
 class SessionIndex:
-    def __init__(self, session_id: str, filename: str, clauses: List[Clause], embeddings: np.ndarray):
+    def __init__(
+        self,
+        session_id: str,
+        filename: str,
+        clauses: List[Clause],
+        embeddings: np.ndarray,
+        overall_fairness_score: int = 50,
+    ):
         self.session_id = session_id
         self.filename = filename
         self.clauses = clauses
+        self.overall_fairness_score = overall_fairness_score
         self.texts = [f"{c.title}: {c.text}" for c in clauses]
         self.embeddings = embeddings  # Shape: (N, D), assumed L2-normalized
 
@@ -72,7 +80,13 @@ class RAGEngine:
                 matrix[i] /= norm
         return matrix
 
-    def index_document(self, session_id: str, filename: str, clauses: List[Clause]) -> SessionIndex:
+    def index_document(
+        self,
+        session_id: str,
+        filename: str,
+        clauses: List[Clause],
+        overall_fairness_score: int = 50,
+    ) -> SessionIndex:
         """Embeds and indexes all document clauses into the session memory."""
         chunk_texts = [f"{c.title}\n{c.text}\n{c.plain_english_summary}" for c in clauses]
         if not chunk_texts:
@@ -84,6 +98,7 @@ class RAGEngine:
             filename=filename,
             clauses=clauses,
             embeddings=embeddings,
+            overall_fairness_score=overall_fairness_score,
         )
         self.sessions[session_id] = session_idx
         return session_idx

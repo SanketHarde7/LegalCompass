@@ -320,16 +320,25 @@ class DocumentParser:
         return "".join(normalized_chars), norm_to_orig
 
     def _find_offsets_in_page(self, chunk_text: str, page_text: str) -> Tuple[Optional[int], Optional[int]]:
-        """Captures character-exact start and end offsets relative to the source page text."""
+        """Captures character-exact start and end offsets relative to the source page text.
+        
+        Only accepts:
+        1. Exact full substring match in page text
+        2. Exact normalized full substring match with character-accurate index mapping
+        
+        For multi-page clauses that span across page breaks or partial matches, returns
+        (None, None) to prevent bogus or fabricated partial offsets until multi-page
+        sourceSpans are supported.
+        """
         if not page_text or not chunk_text:
             return None, None
 
-        # 1. Direct exact substring match
+        # 1. Direct exact full substring match
         idx = page_text.find(chunk_text)
         if idx != -1:
             return idx, idx + len(chunk_text)
 
-        # 2. Normalized source match with exact coordinate mapping
+        # 2. Normalized full substring match with exact coordinate mapping
         norm_page, page_mapping = self._normalize_with_mapping(page_text)
         norm_chunk, _ = self._normalize_with_mapping(chunk_text)
 
@@ -339,27 +348,6 @@ class DocumentParser:
                 orig_start = page_mapping[norm_idx]
                 orig_end = page_mapping[norm_idx + len(norm_chunk) - 1] + 1
                 return orig_start, min(len(page_text), orig_end)
-
-            # Check if opening snippet (first 100 chars) matches
-            head_len = min(100, len(norm_chunk))
-            norm_head = norm_chunk[:head_len]
-            head_idx = norm_page.find(norm_head)
-            if head_idx != -1 and head_idx < len(page_mapping):
-                orig_start = page_mapping[head_idx]
-                tail_len = min(50, len(norm_chunk))
-                norm_tail = norm_chunk[-tail_len:]
-                tail_idx = norm_page.find(norm_tail, head_idx)
-                if tail_idx != -1 and tail_idx + tail_len - 1 < len(page_mapping):
-                    orig_end = page_mapping[tail_idx + tail_len - 1] + 1
-                    return orig_start, min(len(page_text), orig_end)
-                return orig_start, min(len(page_text), orig_start + len(chunk_text))
-
-        # 3. Match by distinctive first line anchor
-        first_line = chunk_text.splitlines()[0].strip() if chunk_text.splitlines() else ""
-        if len(first_line) > 12:
-            start_idx = page_text.find(first_line)
-            if start_idx != -1:
-                return start_idx, min(len(page_text), start_idx + len(chunk_text))
 
         return None, None
 

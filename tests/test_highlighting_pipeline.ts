@@ -140,6 +140,38 @@ assert(spanC === null, 'Clause with invalid offsets and missing text must NOT be
 console.log('  [PASS] Negative startOffset correctly rejected; no highlight applied.');
 
 // -----------------------------------------------------------------------------
+// TEST C2 — WRONG-BUT-SIMILAR OFFSET (Reject partial word overlap)
+// -----------------------------------------------------------------------------
+console.log('\n--- TEST C2: Wrong-But-Similar Offset (Exact normalized equivalence required) ---');
+// Page text has: "Client shall indemnify Contractor against third-party liabilities."
+// Clause text has: "Contractor shall indemnify Client against third-party liabilities."
+// (Directionality is reversed, but 70%+ of words match!)
+const pageTextC2 = 'Beginning of contract. Client shall indemnify Contractor against third-party liabilities. End of section.';
+const startC2 = pageTextC2.indexOf('Client shall indemnify');
+const endC2 = startC2 + 'Client shall indemnify Contractor against third-party liabilities.'.length;
+
+const clauseC2: Clause = {
+  id: 'clause_c2',
+  title: 'Indemnity',
+  originalText: 'Contractor shall indemnify Client against third-party liabilities.',
+  plainSummary: 'Contractor indemnity',
+  riskLevel: 'HIGH',
+  category: 'LIABILITY',
+  unfairnessScore: 90,
+  pageNumber: 1,
+  startOffset: startC2,
+  endOffset: endC2,
+};
+
+assert(
+  !validateOffsets(clauseC2.startOffset, clauseC2.endOffset, pageTextC2, clauseC2.originalText),
+  'Offsets pointing to reversed/similar wording must be rejected by exact normalized equivalence'
+);
+const spanC2 = resolveClauseHighlightSpan(clauseC2, pageTextC2);
+assert(spanC2 === null, 'Wrong-but-similar offset must return null');
+console.log('  [PASS] Wrong-but-similar offset correctly rejected (zero loose word-overlap false positives).');
+
+// -----------------------------------------------------------------------------
 // TEST D — END OUT OF RANGE
 // -----------------------------------------------------------------------------
 console.log('\n--- TEST D: End Out of Range (endOffset = 1500 on 1000-char page) ---');

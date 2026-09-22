@@ -4,8 +4,9 @@ from app.schemas.chat import ChatStreamRequest
 from app.services.rag_engine import rag_engine
 from app.services.llm_service import llm_service
 from app.schemas.contract import Clause
-from typing import List
+from typing import Any, List
 import logging
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -27,6 +28,7 @@ async def chat_copilot(request: ChatStreamRequest):
     session = rag_engine.get_session(session_id)
     context_clauses: List[Clause] = []
     filename = "Active Agreement"
+    
     overall_fairness: Any = 50
 
     if session:
