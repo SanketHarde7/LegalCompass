@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field, ConfigDict
 
 RiskLevel = Literal["HIGH", "MEDIUM", "LOW", "NEUTRAL"]
 
+ClauseKind = Literal["DEFINITION", "HEADING", "RECITAL", "BOILERPLATE", "OPERATIVE"]
+
 RiskCategory = Literal[
     "INDEMNIFICATION",
     "LIABILITY",
@@ -39,6 +41,18 @@ class Clause(BaseModel):
     unfairness_score: int = Field(
         default=30, alias="unfairnessScore", description="Unfairness score 0 (fair) to 100 (predatory)"
     )
+    clause_kind: str = Field(
+        default="OPERATIVE", alias="clauseKind",
+        description="Structural classification: DEFINITION, HEADING, RECITAL, BOILERPLATE, OPERATIVE"
+    )
+    is_risk_bearing: bool = Field(
+        default=True, alias="isRiskBearing",
+        description="Whether this clause can carry material risk (False for definitions, headings, recitals)"
+    )
+    risk_reasons: List[str] = Field(
+        default_factory=list, alias="riskReasons",
+        description="Specific semantic reasons justifying the assigned risk_level"
+    )
     page_number: Optional[int] = Field(
         default=1, alias="pageNumber", description="Page number in source PDF if applicable"
     )
@@ -68,6 +82,18 @@ class Clause(BaseModel):
     @property
     def suggestion(self) -> Optional[str]:
         return self.suggested_pushback
+
+    @property
+    def clauseKind(self) -> str:
+        return self.clause_kind
+
+    @property
+    def isRiskBearing(self) -> bool:
+        return self.is_risk_bearing
+
+    @property
+    def riskReasons(self) -> List[str]:
+        return self.risk_reasons
 
     @property
     def pageNumber(self) -> Optional[int]:

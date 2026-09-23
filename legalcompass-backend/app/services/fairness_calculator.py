@@ -1,16 +1,18 @@
 """
-Overall Fairness Score Calculator for LegalCompass.
+Overall Fairness Score Calculator for LegalCompass — Accuracy V2.
 
 Calculates an authoritative document-level fairness score [0-100] directly
-from evaluated clause-level results, replacing naive arithmetic averaging
-of LLM batch scores.
+from evaluated clause-level results, with risk-bearing awareness.
 
 Key principles:
 - Authoritative input: final merged Clause list.
+- Risk-bearing awareness: Non-risk-bearing clauses (definitions, headings,
+  recitals) have near-zero influence (0.2x weight), preventing them from
+  mathematically masking predatory traps.
 - Differential weighting: High-risk clauses carry high impact (3.0x),
-  while neutral/definitional clauses have low influence (0.5x).
-- Severity adjustment: Severe traps (uncapped indemnity, unconditional IP transfer)
-  cannot be mathematically masked by dozens of boilerplate definitions.
+  while standard LOW clauses have moderate influence (1.0x).
+- Severity adjustment: Only risk-bearing HIGH/MEDIUM clauses count toward
+  severity penalties.
 - Batch invariance: The calculated score is deterministic and invariant to
   how many batches were used during LLM processing.
 """
@@ -20,14 +22,19 @@ from app.schemas.contract import Clause
 
 
 # Tunable constants for material risk weights
-WEIGHT_NEUTRAL = 0.5   # Pure definitions and headings have minimal influence
+WEIGHT_NON_RISK = 0.2  # Non-risk-bearing clauses (definitions, headings, recitals)
+WEIGHT_NEUTRAL = 0.5   # Risk-bearing but neutral clauses
 WEIGHT_LOW = 1.0       # Standard commercial covenants
 WEIGHT_MEDIUM = 1.8    # Significant imbalance (Net-60, subjective withholding)
 WEIGHT_HIGH = 3.0      # Existential legal traps (uncapped indemnity, IP loss)
 
 
 def calculate_overall_fairness(clauses: List[Clause]) -> int:
-    """Calculates deterministic overall fairness score [10-100] from final clauses."""
+    """Calculates deterministic overall fairness score [10-100] from final clauses.
+
+    Accuracy V2: Uses is_risk_bearing to ensure non-operative clauses
+    (definitions, headings, recitals) don't dilute the score.
+    """
     if not clauses:
         return 50
 
@@ -39,14 +46,17 @@ def calculate_overall_fairness(clauses: List[Clause]) -> int:
     for c in clauses:
         risk = (c.risk_level or "LOW").upper()
         unfairness = c.unfairness_score if c.unfairness_score is not None else 25
+        is_risk_bearing = getattr(c, "is_risk_bearing", True)
 
-        # Determine clause weight
-        if risk == "HIGH":
+        # Accuracy V2: Non-risk-bearing clauses get near-zero weight
+        if not is_risk_bearing:
+            weight = WEIGHT_NON_RISK
+        elif risk == "HIGH":
             weight = WEIGHT_HIGH
-            high_count += 1
+            high_count += 1  # Only count risk-bearing HIGH clauses
         elif risk == "MEDIUM":
             weight = WEIGHT_MEDIUM
-            medium_count += 1
+            medium_count += 1  # Only count risk-bearing MEDIUM clauses
         elif risk == "NEUTRAL":
             weight = WEIGHT_NEUTRAL
         else:  # LOW or other
@@ -64,6 +74,7 @@ def calculate_overall_fairness(clauses: List[Clause]) -> int:
 
     # Structural severity penalty for material traps
     # Prevents contracts with 20 boilerplate definitions from hiding 2 fatal traps
+    # Only applies to risk-bearing HIGH clauses
     if high_count == 1:
         severity_penalty = 8
     elif high_count == 2:

@@ -18,6 +18,9 @@ export interface Clause {
   category: ClauseCategory;
   unfairnessScore: number; // 0 (wholly fair) to 100 (predatory / extremely unfair)
   suggestion?: string;
+  clauseKind?: string;      // DEFINITION | HEADING | RECITAL | BOILERPLATE | OPERATIVE
+  isRiskBearing?: boolean;  // false for definitions, headings, recitals
+  riskReasons?: string[];   // semantic reasons justifying the risk_level
   pageNumber?: number;
   startOffset?: number;
   endOffset?: number;

@@ -72,6 +72,10 @@ async def chat_copilot(request: ChatStreamRequest):
                     plain_english_summary=c_summary,
                     suggested_pushback=c_sugg,
                     category=c_data.get("category", "OTHER"),
+                    clause_kind=c_data.get("clauseKind") or c_data.get("clause_kind", "OPERATIVE"),
+                    is_risk_bearing=c_data.get("isRiskBearing", c_data.get("is_risk_bearing", True)),
+                    risk_reasons=c_data.get("riskReasons") or c_data.get("risk_reasons", []),
+                    unfairness_score=c_data.get("unfairnessScore") or c_data.get("unfairness_score", 30),
                 )
                 if request.selected_clause_id and c_id == request.selected_clause_id:
                     context_clauses.insert(0, clause_obj)

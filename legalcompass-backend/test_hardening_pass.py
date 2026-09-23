@@ -419,7 +419,7 @@ def test_fix_5_chat_citation_and_suggestion_hardening():
         assert gemini_cite["clause_ids"] == ["clause_4"], f"Gemini citations mismatch: {gemini_cite}"
 
         # Mock Groq failover
-        llm_service._gemini_client = None  # Force Gemini to fail / be absent
+        llm_service._gemini_client = False  # Force Gemini to fail / be absent (False prevents re-init from live API key)
         groq_mock = MagicMock()
         mock_choice = MagicMock()
         mock_choice.delta.content = "Groq analysis [CITE:clause_4] completed."
