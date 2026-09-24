@@ -129,7 +129,7 @@ class LLMService:
             return None
         try:
             from groq import AsyncGroq
-            self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+            self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY, max_retries=0)
             logger.info(f"Groq client initialized with model: {settings.GROQ_MODEL_ID}")
         except Exception as e:
             logger.warning(f"Failed to initialize Groq client: {e}")
@@ -146,35 +146,43 @@ class LLMService:
         if gemini:
             try:
                 logger.info(f"Invoking Gemini model: {settings.GEMINI_MODEL_ID}")
-                response = gemini.models.generate_content(
-                    model=settings.GEMINI_MODEL_ID,
-                    contents=prompt,
-                    config={
-                        "system_instruction": AUDITOR_PROMPT,
-                        "response_mime_type": "application/json",
-                        "temperature": 0.1,
-                    },
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        gemini.models.generate_content,
+                        model=settings.GEMINI_MODEL_ID,
+                        contents=prompt,
+                        config={
+                            "system_instruction": AUDITOR_PROMPT,
+                            "response_mime_type": "application/json",
+                            "temperature": 0.1,
+                        },
+                    ),
+                    timeout=25.0,
                 )
                 if response.text:
                     parsed = self._extract_json(response.text)
                     if parsed:
                         return parsed
             except Exception as e:
-                logger.warning(f"Gemini call failed or quota exceeded: {e}. Failing over to Groq...")
+                logger.warning(f"Gemini call failed or timed out: {e}. Failing over to Groq...")
 
         # 2. Try Groq (Failover)
         groq = self._get_groq_client()
         if groq:
             try:
                 logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID}")
-                chat_completion = await groq.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": AUDITOR_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    model=settings.GROQ_MODEL_ID,
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
+                chat_completion = await asyncio.wait_for(
+                    groq.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": AUDITOR_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                        model=settings.GROQ_MODEL_ID,
+                        temperature=0.1,
+                        max_tokens=4096,
+                        response_format={"type": "json_object"},
+                    ),
+                    timeout=20.0,
                 )
                 raw_json = chat_completion.choices[0].message.content
                 if raw_json:
@@ -182,7 +190,7 @@ class LLMService:
                     if parsed:
                         return parsed
             except Exception as e:
-                logger.warning(f"Groq call failed: {e}.")
+                logger.warning(f"Groq call failed or timed out: {e}.")
 
         return None
 
@@ -230,23 +238,36 @@ class LLMService:
         overview_snippets: List[str] = []
         total_batches = len(batches)
 
-        for batch_idx, batch in enumerate(batches):
-            # Root cause E: Send ALREADY-PARSED initial_clauses as structured JSON payload
-            structured_clauses = [
-                {"clause_id": c.id, "title": c.title, "text": c.text}
-                for c in batch
-            ]
-            batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
-            prompt = (
-                f"Contract Filename: {filename}\n"
-                f"Document Title: {document_title or 'N/A'}\n\n"
-                f"Input Clauses to Audit{batch_header}:\n"
-                f"{json.dumps(structured_clauses, indent=2)}\n\n"
-                "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
-            )
+        # Process batches concurrently (bounded by semaphore to respect rate limits)
+        sem = asyncio.Semaphore(3)
 
-            batch_res = await self._call_llm_json(prompt)
-            if batch_res and "clauses" in batch_res:
+        async def _process_single_batch(batch_idx: int, batch: List[Clause]):
+            async with sem:
+                structured_clauses = [
+                    {"clause_id": c.id, "title": c.title, "text": c.text}
+                    for c in batch
+                ]
+                batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
+                prompt = (
+                    f"Contract Filename: {filename}\n"
+                    f"Document Title: {document_title or 'N/A'}\n\n"
+                    f"Input Clauses to Audit{batch_header}:\n"
+                    f"{json.dumps(structured_clauses, indent=2)}\n\n"
+                    "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
+                )
+                try:
+                    return await self._call_llm_json(prompt)
+                except Exception as e:
+                    logger.warning(f"Batch {batch_idx + 1} analysis failed: {e}")
+                    return None
+
+        batch_results = await asyncio.gather(
+            *[_process_single_batch(idx, b) for idx, b in enumerate(batches)],
+            return_exceptions=True,
+        )
+
+        for batch_res in batch_results:
+            if isinstance(batch_res, dict) and "clauses" in batch_res:
                 for cd in batch_res.get("clauses", []):
                     all_evaluated_clauses.append(cd)
                 if "overall_fairness_score" in batch_res:
@@ -521,35 +542,43 @@ class LLMService:
         if gemini:
             try:
                 logger.info(f"Simulating scenario via Gemini: {settings.GEMINI_MODEL_ID}")
-                response = gemini.models.generate_content(
-                    model=settings.GEMINI_MODEL_ID,
-                    contents=user_msg,
-                    config={
-                        "system_instruction": SIMULATION_PROMPT,
-                        "response_mime_type": "application/json",
-                        "temperature": 0.1,
-                    },
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        gemini.models.generate_content,
+                        model=settings.GEMINI_MODEL_ID,
+                        contents=user_msg,
+                        config={
+                            "system_instruction": SIMULATION_PROMPT,
+                            "response_mime_type": "application/json",
+                            "temperature": 0.1,
+                        },
+                    ),
+                    timeout=25.0,
                 )
                 if response.text:
                     data = self._extract_json(response.text)
                     if data:
                         return ScenarioSimulationResult(**data)
             except Exception as e:
-                logger.warning(f"Gemini simulation failed: {e}. Failing over to Groq...")
+                logger.warning(f"Gemini simulation failed or timed out: {e}. Failing over to Groq...")
 
         # 2. Try Groq
         groq = self._get_groq_client()
         if groq:
             try:
                 logger.info(f"Simulating scenario via Groq: {settings.GROQ_MODEL_ID}")
-                comp = await groq.chat.completions.create(
-                    model=settings.GROQ_MODEL_ID,
-                    messages=[
-                        {"role": "system", "content": SIMULATION_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
+                comp = await asyncio.wait_for(
+                    groq.chat.completions.create(
+                        model=settings.GROQ_MODEL_ID,
+                        messages=[
+                            {"role": "system", "content": SIMULATION_PROMPT},
+                            {"role": "user", "content": user_msg},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=2048,
+                    ),
+                    timeout=20.0,
                 )
                 raw = comp.choices[0].message.content
                 if raw:
@@ -557,7 +586,7 @@ class LLMService:
                     if data:
                         return ScenarioSimulationResult(**data)
             except Exception as e:
-                logger.warning(f"Groq simulation failed: {e}. Using heuristic simulation...")
+                logger.warning(f"Groq simulation failed or timed out: {e}. Using heuristic simulation...")
 
         # 3. Fallback Heuristic
         return self._heuristic_simulate(prompt, context_clauses)

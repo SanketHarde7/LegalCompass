@@ -175,6 +175,7 @@ export async function uploadContract(file: File): Promise<ContractDocument> {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
+      timeout: 120000,
     });
 
     const resData = response.data;
