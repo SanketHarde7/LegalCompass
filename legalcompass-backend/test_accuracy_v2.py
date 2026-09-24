@@ -530,9 +530,77 @@ def test_10_unresolved_reference():
     print("  ✓ Test 10: Unresolved reference to nonexistent Section 99 handled gracefully with no fabrication")
 
 
+def test_11_neutral_term_duration_under_compound_title():
+    """TEST 11 — Neutral term duration under compound title 'TERM AND RENEWAL' → OPERATIVE, LOW risk, not TERMINATION risk."""
+    eval_res = heuristic_engine.evaluate_clause(
+        title="SECTION 2: TERM AND RENEWAL — Initial Term",
+        text="This Agreement commences on the Effective Date and shall remain in effect for an initial duration of twelve (12) months, unless terminated earlier in accordance with Section 4.",
+    )
+    assert eval_res.clause_kind == "OPERATIVE", f"Expected OPERATIVE, got {eval_res.clause_kind}"
+    assert eval_res.is_risk_bearing is True, f"Expected is_risk_bearing=True, got {eval_res.is_risk_bearing}"
+    assert eval_res.risk_level == "LOW", f"Expected LOW risk, got {eval_res.risk_level}"
+    assert eval_res.unfairness_score <= 20, f"Expected unfairness <= 20, got {eval_res.unfairness_score}"
+    assert eval_res.category != "TERMINATION", f"Expected non-TERMINATION category, got {eval_res.category}"
+    print("  ✓ Test 11: Neutral term duration under compound title scored LOW (not TERMINATION risk)")
+
+
+def test_12_mutual_renewal_customary_notice():
+    """TEST 12 — Customary mutual renewal with 30-day notice → OPERATIVE, LOW risk."""
+    eval_res = heuristic_engine.evaluate_clause(
+        title="TERM AND RENEWAL — Renewal Terms",
+        text="This Agreement shall automatically renew for successive terms of one (1) year each, unless either party gives written notice of its intent not to renew at least thirty (30) days prior to the expiration of the then-current term.",
+    )
+    assert eval_res.clause_kind == "OPERATIVE", f"Expected OPERATIVE, got {eval_res.clause_kind}"
+    assert eval_res.is_risk_bearing is True, f"Expected is_risk_bearing=True, got {eval_res.is_risk_bearing}"
+    assert eval_res.risk_level == "LOW", f"Expected LOW risk, got {eval_res.risk_level}"
+    assert eval_res.unfairness_score <= 25, f"Expected unfairness <= 25, got {eval_res.unfairness_score}"
+    print("  ✓ Test 12: Mutual renewal with customary 30-day notice scored LOW")
+
+
+def test_13_unilateral_renewal_counterparty_option():
+    """TEST 13 — Unilateral renewal at counterparty's sole discretion without consent → HIGH risk."""
+    eval_res = heuristic_engine.evaluate_clause(
+        title="Extension of Agreement",
+        text="Client shall have the sole option and unilateral right to renew this Agreement for additional successive periods of twelve (12) months each upon written notice to Contractor, without requiring Contractor consent.",
+    )
+    assert eval_res.clause_kind == "OPERATIVE", f"Expected OPERATIVE, got {eval_res.clause_kind}"
+    assert eval_res.is_risk_bearing is True, f"Expected is_risk_bearing=True, got {eval_res.is_risk_bearing}"
+    assert eval_res.risk_level == "HIGH", f"Expected HIGH risk, got {eval_res.risk_level}"
+    assert eval_res.unfairness_score >= 75, f"Expected unfairness >= 75, got {eval_res.unfairness_score}"
+    assert len(eval_res.risk_reasons) >= 2, f"Expected >= 2 risk reasons, got {len(eval_res.risk_reasons)}"
+    print("  ✓ Test 13: Unilateral renewal at counterparty's sole option scored HIGH")
+
+
+def test_14_automatic_renewal_excessive_notice_trap():
+    """TEST 14 — Automatic renewal with excessive 90-day notice window → MEDIUM risk."""
+    eval_res = heuristic_engine.evaluate_clause(
+        title="Term Extension and Rollover",
+        text="Upon expiration of the initial term, this Agreement shall automatically renew for successive three-year periods unless Contractor provides formal written notice of non-renewal at least ninety (90) days prior to the expiration date.",
+    )
+    assert eval_res.clause_kind == "OPERATIVE", f"Expected OPERATIVE, got {eval_res.clause_kind}"
+    assert eval_res.is_risk_bearing is True, f"Expected is_risk_bearing=True, got {eval_res.is_risk_bearing}"
+    assert eval_res.risk_level == "MEDIUM", f"Expected MEDIUM risk, got {eval_res.risk_level}"
+    assert eval_res.unfairness_score >= 50, f"Expected unfairness >= 50, got {eval_res.unfairness_score}"
+    assert len(eval_res.risk_reasons) >= 1, f"Expected >= 1 risk reasons, got {len(eval_res.risk_reasons)}"
+    print("  ✓ Test 14: Automatic renewal with excessive 90-day notice scored MEDIUM")
+
+
+def test_15_term_expiration_with_forfeiture():
+    """TEST 15 — Term expiration with forfeiture of compensation → HIGH risk."""
+    eval_res = heuristic_engine.evaluate_clause(
+        title="Contract Term and Expiration",
+        text="The term of this Agreement shall expire on December 31, 2026. Upon expiration without renewal, Contractor shall forfeit all unbilled fees and receive no compensation for work in progress.",
+    )
+    assert eval_res.clause_kind == "OPERATIVE", f"Expected OPERATIVE, got {eval_res.clause_kind}"
+    assert eval_res.is_risk_bearing is True, f"Expected is_risk_bearing=True, got {eval_res.is_risk_bearing}"
+    assert eval_res.risk_level == "HIGH", f"Expected HIGH risk, got {eval_res.risk_level}"
+    assert eval_res.unfairness_score >= 80, f"Expected unfairness >= 80, got {eval_res.unfairness_score}"
+    print("  ✓ Test 15: Term expiration with forfeiture scored HIGH")
+
+
 def main():
     print("================================================================")
-    print("ACCURACY V2.1 — GENERALIZED REGRESSION TEST SUITE")
+    print("ACCURACY V2.2 — GENERALIZED REGRESSION TEST SUITE")
     print("(Zero Hardcoding — All Synthetic Inline Text)")
     print("================================================================\n")
 
@@ -580,6 +648,26 @@ def main():
     ]
 
     for label, fn in tests_v2_1:
+        try:
+            fn()
+            passed += 1
+        except AssertionError as e:
+            print(f"  ✗ Test {label}: FAILED — {e}")
+            failed += 1
+        except Exception as e:
+            print(f"  ✗ Test {label}: ERROR — {e}")
+            failed += 1
+
+    print("\n--- Accuracy V2.2 Term & Renewal Hardening Tests (11 - 15) ---")
+    tests_v2_2 = [
+        ("11", test_11_neutral_term_duration_under_compound_title),
+        ("12", test_12_mutual_renewal_customary_notice),
+        ("13", test_13_unilateral_renewal_counterparty_option),
+        ("14", test_14_automatic_renewal_excessive_notice_trap),
+        ("15", test_15_term_expiration_with_forfeiture),
+    ]
+
+    for label, fn in tests_v2_2:
         try:
             fn()
             passed += 1

@@ -124,6 +124,52 @@ class HeuristicEngine:
         re.IGNORECASE,
     )
 
+    # Term duration and initial effective period indicators
+    RE_TERM_DURATION = re.compile(
+        r"\b(?:"
+        r"commences?\s+on|"
+        r"effective\s+date\s+of\s+this\s+agreement|"
+        r"(?:initial\s+term|initial\s+period)\s+of|"
+        r"shall\s+(?:remain\s+in\s+effect|continue|endure)\s+for\s+(?:an?\s+)?(?:initial\s+)?(?:period|term)|"
+        r"term\s+of\s+this\s+agreement\s+shall\s+be|"
+        r"shall\s+expire\s+on|"
+        r"expiration\s+date|"
+        r"effective\s+until\s+(?:terminated|expired)"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Affirmative termination covenants and procedures
+    RE_TERMINATION_COVENANT = re.compile(
+        r"\b(?:"
+        r"(?:may|has\s+the\s+right\s+to|entitled\s+to|reserves\s+the\s+right\s+to)\s+terminate|"
+        r"terminate\s+(?:this\s+agreement|the\s+agreement|immediately|at\s+any\s+time|for\s+convenience|for\s+cause|without\s+cause)|"
+        r"(?:right|option)\s+to\s+terminate|"
+        r"(?:notice|grounds)\s+of\s+termination|"
+        r"in\s+the\s+event\s+of\s+termination|"
+        r"upon\s+termination|"
+        r"following\s+termination|"
+        r"cancel\s+(?:this\s+agreement|the\s+agreement)|"
+        r"cancellation\s+of\s+this\s+agreement"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Renewal covenants and extensions
+    RE_RENEWAL_COVENANT = re.compile(
+        r"\b(?:"
+        r"auto(?:matically)?\s*[-]?\s*renew(?:s|al|ed|ing)?|"
+        r"renew(?:s|al|ed|ing)?\s+for\s+(?:an?\s+)?(?:additional|successive)|"
+        r"successive\s+(?:term|terms|period|periods)|"
+        r"extend(?:s|ed|ing)?\s+the\s+term|"
+        r"extension\s+of\s+(?:the\s+)?term|"
+        r"option\s+to\s+renew|"
+        r"right\s+to\s+renew|"
+        r"notice\s+of\s+non-renewal"
+        r")\b",
+        re.IGNORECASE,
+    )
+
     # Operative trap patterns — these override DEFINITION/HEADING classification
     RE_OPERATIVE_TRAP = re.compile(
         r"\b(?:(?:contractor|tenant|client|party|employee|licensee)\s+"
@@ -266,49 +312,68 @@ class HeuristicEngine:
             if negation_result:
                 return negation_result
 
-        # Category-specific evaluation
-        text_lower = full_text.lower()
+        # ── Step 4: Category-Specific Semantic Evaluation (primarily based on clause body) ──
 
-        # Indemnification
-        if any(k in text_lower for k in ["indemn", "hold harmless", "defend and hold"]):
+        # 1. Order of Precedence Conflict (evaluated before payment, since OoP contains "invoice")
+        has_oop_body = (
+            any(k in body_lower for k in ["order of precedence", "purchase order shall control", "invoice shall control", "supersede and strictly control", "prevail over"])
+            or (any(k in body_lower for k in ["purchase order", "invoice", "vendor form"]) and any(k in body_lower for k in ["control", "prevail", "supersede", "conflict", "inconsistency"]))
+        )
+        if has_oop_body and any(k in body_lower for k in ["control", "prevail", "supersede"]):
+            return HeuristicAssessment(
+                category="DISPUTE_RESOLUTION",
+                risk_level="HIGH",
+                unfairness_score=85,
+                plain_summary="Order of precedence carves out payment terms or liability to purchase orders, allowing unilateral counterparty terms to override this agreement.",
+                suggested_pushback="The terms and conditions of this Agreement shall strictly prevail and control over any conflict with any Purchase Order or invoice.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: counterparty PO/invoice terms can override contract protections",
+                    "Meaningful imbalance: unilateral override power given to one party's documents",
+                    "Insufficient mitigation: no mutual agreement required for override",
+                ],
+            )
+
+        # 2. Indemnification (must have substantive indemnification language in body)
+        if any(k in body_lower for k in ["indemn", "hold harmless", "defend and hold"]):
             return self._evaluate_indemnification(body_lower, is_reciprocal, is_negated, has_mitigation, clause_kind)
 
-        # Intellectual Property & Work Product
-        if any(k in text_lower for k in ["intellectual property", "inventions", "work made for hire", "assigns", "deliverables"]):
+        # 3. Intellectual Property & Work Product (must have substantive IP language in body)
+        if any(k in body_lower for k in [
+            "work made for hire", "irrevocably assign", "assigns all", "assign all",
+            "intellectual property", "inventions", "deliverables", "proprietary rights",
+            "ownership of work", "background ip",
+        ]):
             return self._evaluate_ip(title, body_lower, has_mitigation, clause_kind)
 
-        # Termination
-        if any(k in text_lower for k in ["terminate", "termination", "cancel", "renewal"]):
+        # 4. Term, Renewal & Termination (distinguish duration, renewal covenants, and termination covenants)
+        has_term_duration = bool(self.RE_TERM_DURATION.search(body_lower))
+        has_renewal_covenant = bool(self.RE_RENEWAL_COVENANT.search(body_lower))
+        has_termination_covenant = bool(self.RE_TERMINATION_COVENANT.search(body_lower))
+
+        # 4a. Pure Term Duration (without renewal or termination covenants)
+        if has_term_duration and not has_renewal_covenant and not has_termination_covenant:
+            return self._evaluate_term_duration(body_lower, clause_kind)
+
+        # 4b. Renewal / Extension Covenants
+        if has_renewal_covenant:
+            return self._evaluate_renewal(body_lower, is_reciprocal, has_mitigation, clause_kind)
+
+        # 4c. Affirmative Termination Covenants
+        if has_termination_covenant:
             return self._evaluate_termination(body_lower, is_reciprocal, is_negated, has_mitigation, clause_kind)
 
-        # Order of Precedence Conflict (MUST be before Payment Terms — OoP clauses contain "invoice")
-        if any(k in text_lower for k in ["order of precedence", "purchase order shall control", "invoice shall control", "supersede"]):
-            if any(k in body_lower for k in ["purchase order", "invoice", "vendor form"]) and any(k in body_lower for k in ["control", "prevail", "supersede"]):
-                return HeuristicAssessment(
-                    category="DISPUTE_RESOLUTION",
-                    risk_level="HIGH",
-                    unfairness_score=85,
-                    plain_summary="Order of precedence carves out payment terms or liability to purchase orders, allowing unilateral counterparty terms to override this agreement.",
-                    suggested_pushback="The terms and conditions of this Agreement shall strictly prevail and control over any conflict with any Purchase Order or invoice.",
-                    clause_kind=clause_kind,
-                    is_risk_bearing=True,
-                    risk_reasons=[
-                        "Material consequence: counterparty PO/invoice terms can override contract protections",
-                        "Meaningful imbalance: unilateral override power given to one party's documents",
-                        "Insufficient mitigation: no mutual agreement required for override",
-                    ],
-                )
-
-        # Payment Terms & Setoff
-        if any(k in text_lower for k in ["payment", "invoice", "net 60", "net 90", "net-60", "net-90", "withhold", "setoff", "set off"]):
+        # 5. Payment Terms & Setoff
+        if any(k in body_lower for k in ["payment", "invoice", "net 30", "net 60", "net 90", "net-30", "net-60", "net-90", "withhold", "setoff", "set off", "billing", "fees", "remit", "disbursement"]):
             return self._evaluate_payment(body_lower, has_mitigation, clause_kind)
 
-        # Tenancy / Quiet Enjoyment
-        if any(k in text_lower for k in ["enter premises", "unannounced", "routine inspection", "carpet", "deposit"]):
+        # 6. Tenancy / Quiet Enjoyment
+        if any(k in body_lower for k in ["enter premises", "unannounced", "routine inspection", "carpet", "deposit", "quiet enjoyment"]):
             return self._evaluate_tenancy(body_lower, clause_kind)
 
-        # Default Standard Provision
-        category = "DISPUTE_RESOLUTION" if any(k in text_lower for k in ["dispute", "governing law", "jurisdiction"]) else "OTHER"
+        # 7. Default Standard Provision (catch-all for other operative clauses, e.g. governing law, notice, survival)
+        category = "DISPUTE_RESOLUTION" if any(k in body_lower for k in ["dispute", "governing law", "jurisdiction", "arbitration", "venue"]) or any(k in title.lower() for k in ["dispute", "governing law", "jurisdiction", "arbitration"]) else "OTHER"
         return HeuristicAssessment(
             category=category,
             risk_level="LOW",
@@ -781,6 +846,173 @@ class HeuristicEngine:
             risk_reasons=[],
         )
 
+    def _evaluate_term_duration(self, body_lower: str, clause_kind: str) -> HeuristicAssessment:
+        """Evaluates term-duration and expiration provisions.
+        Classifies risk only when the substantive body contains concrete exposure/material imbalance.
+        """
+        # Forfeiture upon term expiration
+        has_forfeiture = any(k in body_lower for k in ["forfeit", "forfeiture", "without payment", "no compensation", "relinquish all rights"])
+        if has_forfeiture:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="HIGH",
+                unfairness_score=85,
+                plain_summary="Term expiration provision imposes forfeiture of compensation or accrued rights upon expiration.",
+                suggested_pushback="Upon expiration of the term, Client shall promptly pay Contractor for all Services performed and Deliverables completed through the expiration date.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: forfeiture of compensation or rights upon term expiration",
+                    "Meaningful imbalance: unilateral forfeiture obligation",
+                ],
+            )
+
+        # Unilateral extension at counterparty's sole discretion
+        has_unilateral_extension = bool(re.search(
+            r"\b(?:client|counterparty|company|customer)\s+[^.\n]*?\b(?:sole\s+option|unilateral\s+right|sole\s+discretion|exclusive\s+option|sole\s+right)\b[^.\n]*?\b(?:to\s+)?(?:extend|renew)\b|"
+            r"\b(?:sole\s+option|unilateral\s+right|sole\s+discretion|exclusive\s+option|sole\s+right)\b[^.\n]*?\b(?:to\s+)?(?:extend|renew)\b|"
+            r"\b(?:extend|renew)[^.\n]*?\bwithout\s+(?:requiring\s+)?(?:contractor(?:'s)?\s+)?consent\b",
+            body_lower,
+            re.IGNORECASE,
+        ))
+        if has_unilateral_extension:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="HIGH",
+                unfairness_score=80,
+                plain_summary="Grants counterparty the unilateral right or option to extend the term without contractor consent.",
+                suggested_pushback="Any extension or renewal of the term shall require the mutual written agreement of both parties.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: forced continuation of obligations upon counterparty demand",
+                    "Meaningful imbalance: counterparty retains unilateral extension authority",
+                ],
+            )
+
+        # Rate freeze across extended terms
+        has_rate_freeze = bool(re.search(
+            r"\b(?:rates?|fees?|pricing)\s+(?:shall\s+remain\s+fixed|frozen|unadjusted|cannot\s+be\s+increased)\b",
+            body_lower,
+            re.IGNORECASE,
+        )) and any(k in body_lower for k in ["extend", "extension", "renewal", "successive"])
+        if has_rate_freeze:
+            return HeuristicAssessment(
+                category="PAYMENT_TERMS",
+                risk_level="MEDIUM",
+                unfairness_score=55,
+                plain_summary="Freezes rates or fees during extended terms without allowing contractor cost-of-living or inflation adjustments.",
+                suggested_pushback="Contractor rates shall be subject to annual adjustment upon mutual written agreement or in accordance with published rate cards.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: rates locked without inflation or cost adjustments",
+                    "Meaningful imbalance: unilateral fee restriction",
+                ],
+            )
+
+        # Standard neutral initial term duration
+        return HeuristicAssessment(
+            category="OTHER",
+            risk_level="LOW",
+            unfairness_score=15,
+            plain_summary="Standard initial term duration provision defining the effective operational period of the agreement.",
+            suggested_pushback=None,
+            clause_kind=clause_kind,
+            is_risk_bearing=True,
+            risk_reasons=[],
+        )
+
+    def _evaluate_renewal(
+        self,
+        body_lower: str,
+        is_reciprocal: bool,
+        mitigation: dict,
+        clause_kind: str,
+    ) -> HeuristicAssessment:
+        """Evaluates contract renewal provisions.
+        Classifies risk only when the substantive body contains real material imbalance.
+        """
+        # Unilateral renewal power
+        has_unilateral_renewal = bool(re.search(
+            r"\b(?:client|counterparty|company|customer)\s+[^.\n]*?\b(?:sole\s+option|unilateral\s+right|sole\s+discretion|exclusive\s+option|sole\s+right)\b[^.\n]*?\b(?:to\s+)?(?:renew|extend)\b|"
+            r"\b(?:sole\s+option|unilateral\s+right|sole\s+discretion|exclusive\s+option|sole\s+right)\b[^.\n]*?\b(?:to\s+)?(?:renew|extend)\b|"
+            r"\b(?:renew|extend)[^.\n]*?\bwithout\s+(?:requiring\s+)?(?:contractor(?:'s)?\s+)?consent\b",
+            body_lower,
+            re.IGNORECASE,
+        ))
+        if has_unilateral_renewal:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="HIGH",
+                unfairness_score=80,
+                plain_summary="Grants counterparty the unilateral right or sole option to renew or extend the agreement without contractor consent, creating a forced lock-in.",
+                suggested_pushback="Any renewal or extension of the Agreement shall require the mutual written agreement of both parties executed prior to the expiration of the then-current term.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: unilateral obligation to continue performance upon counterparty demand",
+                    "Meaningful imbalance: counterparty retains sole renewal discretion without mutual consent",
+                    "Insufficient mitigation: contractor cannot refuse renewal or terminate without penalty",
+                ],
+            )
+
+        # Forfeiture upon non-renewal / expiration
+        has_forfeiture = any(k in body_lower for k in ["without payment for work", "forfeit", "no compensation", "relinquish all claims"])
+        if has_forfeiture:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="HIGH",
+                unfairness_score=85,
+                plain_summary="Imposes forfeiture of compensation or deliverables upon expiration or non-renewal of the contract.",
+                suggested_pushback="Upon non-renewal or expiration, Client shall promptly pay Contractor for all Services performed and Deliverables delivered through the expiration date.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: loss of compensation for completed work upon expiration",
+                    "Meaningful imbalance: forfeiture penalty tied to contract expiration",
+                ],
+            )
+
+        # Automatic lock-in / excessive notice window / asymmetric notice
+        has_excessive_notice = (
+            bool(re.search(
+                r"\b(?:60|90|120|180|sixty|ninety|one\s+hundred\s+(?:and\s+)?twenty)\s*(?:\(\d+\)\s*)?(?:days?|business\s+days?)\b",
+                body_lower,
+                re.IGNORECASE,
+            ))
+            and any(k in body_lower for k in ["notice", "written notice"])
+            and any(k in body_lower for k in ["auto", "automatic", "successive", "renew", "rollover"])
+        )
+        is_unilateral_notice = bool(re.search(r"\bcontractor\s+(?:must|shall)\s+(?:provide|give)\s+notice\b", body_lower)) and not is_reciprocal
+
+        if has_excessive_notice or is_unilateral_notice:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="MEDIUM",
+                unfairness_score=55,
+                plain_summary="Automatic renewal provision imposing an excessive notice period (60+ days) or asymmetric burden to prevent contract rollover.",
+                suggested_pushback="Renewal shall occur only upon mutual written agreement, or either party may opt out of auto-renewal with at least thirty (30) days prior written notice.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: automatic evergreen rollover locks in obligations",
+                    "Meaningful imbalance: excessive or asymmetric notice window required to prevent renewal",
+                ],
+            )
+
+        # Customary / mutual renewal
+        return HeuristicAssessment(
+            category="TERMINATION",
+            risk_level="LOW",
+            unfairness_score=20,
+            plain_summary="Customary mutual renewal provision permitting either party to prevent renewal with standard prior written notice.",
+            suggested_pushback=None,
+            clause_kind=clause_kind,
+            is_risk_bearing=True,
+            risk_reasons=[],
+        )
+
     def _evaluate_termination(self, body_lower: str, is_reciprocal: bool, is_negated: bool, mitigation: dict, clause_kind: str) -> HeuristicAssessment:
         """Evaluates termination clauses with Triple Gate."""
         if is_negated:
@@ -832,27 +1064,60 @@ class HeuristicEngine:
                     ],
                 )
 
-        if is_reciprocal or any(k in body_lower for k in ["either party may terminate upon", "both parties"]):
+        # Unilateral termination for convenience without forfeiture
+        is_unilateral_convenience = bool(re.search(
+            r"\b(?:client|company|customer)\s+may\s+terminate\s+(?:for\s+convenience|without\s+cause)\b",
+            body_lower,
+            re.IGNORECASE,
+        )) and not is_reciprocal
+
+        if is_unilateral_convenience:
+            return HeuristicAssessment(
+                category="TERMINATION",
+                risk_level="MEDIUM",
+                unfairness_score=50,
+                plain_summary="Grants client unilateral termination for convenience rights without reciprocal rights for contractor.",
+                suggested_pushback="Either party may terminate for convenience upon thirty (30) days prior written notice.",
+                clause_kind=clause_kind,
+                is_risk_bearing=True,
+                risk_reasons=[
+                    "Material consequence: unilateral engagement termination",
+                    "Meaningful imbalance: client-only termination for convenience",
+                ],
+            )
+
+        # Mutual or standard termination (reciprocal, breach with cure, or bilateral)
+        is_mutual_or_standard = (
+            is_reciprocal
+            or any(k in body_lower for k in [
+                "either party may terminate upon", "either party may terminate",
+                "both parties", "non-breaching party", "party not in breach",
+                "each party", "mutual written agreement", "neither party may terminate",
+            ])
+            or mitigation["has_cure_period"]
+        )
+
+        if is_mutual_or_standard:
             return HeuristicAssessment(
                 category="TERMINATION",
                 risk_level="LOW",
-                unfairness_score=25,
-                plain_summary="Mutual termination clause allowing either party to end the engagement with customary prior written notice.",
+                unfairness_score=20,
+                plain_summary="Mutual termination clause allowing either party to end the engagement with customary prior written notice or cure period.",
                 suggested_pushback=None,
                 clause_kind=clause_kind,
                 is_risk_bearing=True,
-                risk_reasons=["Mutual termination rights"],
+                risk_reasons=[],
             )
 
         return HeuristicAssessment(
             category="TERMINATION",
-            risk_level="MEDIUM",
-            unfairness_score=50,
-            plain_summary="Termination provision with moderate notice or unilateral cure requirements.",
-            suggested_pushback="Provide mutual termination rights with 30 days written notice and compensation for work completed to date.",
+            risk_level="LOW",
+            unfairness_score=20,
+            plain_summary="Standard termination provision with customary notice and remedy procedures.",
+            suggested_pushback=None,
             clause_kind=clause_kind,
             is_risk_bearing=True,
-            risk_reasons=["Termination provision with moderate imbalance"],
+            risk_reasons=[],
         )
 
     def _evaluate_payment(self, body_lower: str, mitigation: dict, clause_kind: str) -> HeuristicAssessment:
@@ -959,7 +1224,10 @@ class HeuristicEngine:
                 "forfeit", "forfeiture",
                 "waive all claims", "waives all rights",
                 "supersede", "prevail over this agreement",
+                "sole option", "unilateral right", "sole discretion to extend",
+                "sole option to extend", "unilaterally renew", "unilaterally extend",
             ])
+            or (any(k in body_lower for k in ["renew", "renewal", "extend"]) and any(k in body_lower for k in ["sole option", "unilateral", "sole discretion", "without contractor", "without requiring"]))
             or (any(k in body_lower for k in ["terminate", "termination"]) and any(k in body_lower for k in ["immediate", "forfeiture", "without notice"]))
             or (any(k in body_lower for k in ["invoice", "payment"]) and any(k in body_lower for k in ["net 90", "net-90", "withhold all", "unilateral setoff"]))
         )
