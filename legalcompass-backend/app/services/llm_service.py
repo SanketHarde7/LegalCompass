@@ -847,15 +847,32 @@ class LLMService:
 
     async def _heuristic_stream(self, query: str, context: List[Clause]) -> AsyncGenerator[str, None]:
         """Simulates realistic conversational streaming chunks based on context."""
-        matched_clause = context[0] if context else None
-        cite_marker = f" [CITE:{matched_clause.id}]" if matched_clause else ""
-        response_text = (
-            f"Based on your contract terms, particularly **{matched_clause.title if matched_clause else 'the agreement'}**, "
-            "here is an analysis of your operational and legal risk:\n\n"
-            f"1. **Core Exposure:** {matched_clause.plain_english_summary if matched_clause else 'Review the highlighted terms for liability caps.'}{cite_marker}\n"
-            "2. **Legal Leverage:** The drafting party holds significant unilateral leverage under the current draft.\n\n"
-            "**Recommendation:** Propose balanced mutual terms to cap total financial liability and guarantee payment for completed milestones."
-        )
+        from app.services.rag_engine import is_global_risk_query
+
+        if is_global_risk_query(query) and context:
+            top_clauses = context[:5]
+            lines = [
+                "Based on the canonical analysis of your agreement, the most materially risky operative provisions are:\n"
+            ]
+            for idx, c in enumerate(top_clauses, 1):
+                cite = f" [CITE:{c.id}]"
+                summary = c.plain_english_summary or f"Assessed as {c.risk_level} risk with material imbalance."
+                lines.append(f"{idx}. **{c.title}** ({c.risk_level} Risk): {summary}{cite}")
+
+            top_c = top_clauses[0]
+            counter = top_c.suggested_pushback or "Propose mutual liability caps and remove unilateral discretion."
+            lines.append(f"\n**Protective Counter-Proposal:** {counter}")
+            response_text = "\n".join(lines)
+        else:
+            matched_clause = context[0] if context else None
+            cite_marker = f" [CITE:{matched_clause.id}]" if matched_clause else ""
+            response_text = (
+                f"Based on your contract terms, particularly **{matched_clause.title if matched_clause else 'the agreement'}**, "
+                "here is an analysis of your operational and legal risk:\n\n"
+                f"1. **Core Exposure:** {matched_clause.plain_english_summary if matched_clause else 'Review the highlighted terms for liability caps.'}{cite_marker}\n"
+                "2. **Legal Leverage:** The drafting party holds significant unilateral leverage under the current draft.\n\n"
+                "**Recommendation:** Propose balanced mutual terms to cap total financial liability and guarantee payment for completed milestones."
+            )
         words = response_text.split(" ")
         for word in words:
             yield word + " "

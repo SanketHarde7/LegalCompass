@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 from typing import Dict, List, Optional
 from app.schemas.contract import Clause
@@ -10,6 +11,87 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 logger = logging.getLogger(__name__)
+
+RISK_WEIGHTS = {
+    "HIGH": 3,
+    "MEDIUM": 2,
+    "LOW": 1,
+    "NEUTRAL": 0,
+}
+
+NON_RISK_KINDS = {"DEFINITION", "HEADING", "RECITAL", "BOILERPLATE"}
+
+# Intent detection: recognizes inquiries asking to rank, identify, or summarize highest/top/worst risks
+SPECIFIC_CLAUSE_TARGET_RE = re.compile(
+    r"\b(?:why\s+is|explain|what\s+does|how\s+does)\s+(?:clause|section|article|paragraph)\s+[0-9]+",
+    re.IGNORECASE,
+)
+
+GLOBAL_RISK_PATTERNS = [
+    re.compile(
+        r"\b(?:most|highest|top|worst|biggest|greatest|major|main|key|critical|primary|severe)\b.*\b(?:risk|risks|risky|exposure|exposures|danger|dangers|trap|traps|hazard|liabilities|liability|harm|unfair|predatory|adverse)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:risk|risks|risky|exposure|danger|trap|unfairness)\b.*\b(?:rank|ranking|rankings|order|hierarchy|breakdown|summary|overview|list)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:rank|ranking|list)\b.*\b(?:risk|risks|risky|exposure|exposures|traps|clauses|provisions)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:materially\s+risky|material\s+risks?|high\s+risk\s+(?:clauses?|provisions?|terms?)|worst\s+(?:clauses?|provisions?|terms?))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:where\s+am\s+i\s+most\s+exposed|what\s+should\s+i\s+be\s+most\s+worried\s+about|greatest\s+exposure|biggest\s+traps?|top\s+concerns?)\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def is_global_risk_query(query: str) -> bool:
+    """Detects whether a user prompt has global contract-risk/ranking intent.
+    Zero-hardcoded: matches generalized semantic phrasing without contract/clause specificity.
+    """
+    q = query.strip()
+    if not q:
+        return False
+    if SPECIFIC_CLAUSE_TARGET_RE.search(q):
+        return False
+    return any(p.search(q) for p in GLOBAL_RISK_PATTERNS)
+
+
+def is_risk_bearing_clause(c: Clause) -> bool:
+    """Returns True if the clause can carry material legal/operational risk.
+    Strictly excludes definitions, headings, recitals, and boilerplate.
+    """
+    is_rb = getattr(c, "is_risk_bearing", True)
+    if is_rb is False:
+        return False
+    kind = (getattr(c, "clause_kind", "OPERATIVE") or "OPERATIVE").upper()
+    if kind in NON_RISK_KINDS:
+        return False
+    return True
+
+
+def rank_risk_clauses(clauses: List[Clause], limit: int = 7) -> List[Clause]:
+    """Filters for genuine risk-bearing clauses and sorts by canonical severity and unfairness.
+    HIGH > MEDIUM > LOW > NEUTRAL. Secondary sort by unfairness_score descending.
+    Never includes definitions, headings, recitals, or non-risk-bearing boilerplate.
+    """
+    risk_bearing = [c for c in clauses if is_risk_bearing_clause(c)]
+
+    def sort_key(c: Clause):
+        r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
+        weight = RISK_WEIGHTS.get(r_level, 0)
+        unfairness = getattr(c, "unfairness_score", 0) or 0
+        reasons_count = len(getattr(c, "risk_reasons", []) or [])
+        return (weight, unfairness, reasons_count)
+
+    ranked = sorted(risk_bearing, key=sort_key, reverse=True)
+    return ranked[:limit]
 
 
 class SessionIndex:
@@ -118,6 +200,68 @@ class RAGEngine:
         top_indices = np.argsort(scores)[::-1][:k]
 
         return [session.clauses[i] for i in top_indices]
+
+    def retrieve_chat_context(
+        self,
+        session_id: str,
+        query: str,
+        selected_clause_id: Optional[str] = None,
+        k: int = 7,
+    ) -> List[Clause]:
+        """Builds contextual clauses for the chat copilot.
+        If the query has global risk ranking intent, prioritize canonical risk-bearing clauses
+        (ranked by risk_level + unfairness_score) plus semantic RAG coverage.
+        Otherwise, uses standard focused RAG retrieval with selected clause and neighbors.
+        """
+        session = self.sessions.get(session_id)
+        if not session or not session.clauses:
+            return []
+
+        all_clauses = session.clauses
+
+        if is_global_risk_query(query):
+            # 1. Candidate pool: all genuine risk-bearing clauses from active session
+            risk_bearing = [c for c in all_clauses if is_risk_bearing_clause(c)]
+            if not risk_bearing:
+                return []
+
+            # 2. Semantic RAG coverage for query
+            top_rag = self.retrieve_top_k(session_id, query, k=max(k, 5))
+            rag_ids = {c.id for c in top_rag if is_risk_bearing_clause(c)}
+
+            # 3. Rank risk-bearing clauses:
+            # Primary: risk_level (HIGH: 3 > MEDIUM: 2 > LOW: 1 > NEUTRAL: 0)
+            # Secondary: unfairness_score descending
+            # Tertiary: semantic RAG match boost
+            # Quaternary: risk_reasons count
+            def risk_sort_key(c: Clause):
+                r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
+                weight = RISK_WEIGHTS.get(r_level, 0)
+                unfairness = getattr(c, "unfairness_score", 0) or 0
+                in_rag = 1 if c.id in rag_ids else 0
+                reasons_count = len(getattr(c, "risk_reasons", []) or [])
+                return (weight, unfairness, in_rag, reasons_count)
+
+            ranked = sorted(risk_bearing, key=risk_sort_key, reverse=True)
+            return ranked[:k]
+
+        # Standard RAG behavior for specific clause / scenario inquiries
+        context_clauses: List[Clause] = []
+        if selected_clause_id:
+            selected_idx = next((i for i, c in enumerate(all_clauses) if c.id == selected_clause_id), None)
+            if selected_idx is not None:
+                context_clauses.append(all_clauses[selected_idx])
+                if selected_idx > 0 and all_clauses[selected_idx - 1] not in context_clauses:
+                    context_clauses.append(all_clauses[selected_idx - 1])
+                if selected_idx + 1 < len(all_clauses) and all_clauses[selected_idx + 1] not in context_clauses:
+                    context_clauses.append(all_clauses[selected_idx + 1])
+
+        top_k = self.retrieve_top_k(session_id, query, k=k)
+        for c in top_k:
+            if c not in context_clauses:
+                context_clauses.append(c)
+
+        return context_clauses
 
     def get_session(self, session_id: str) -> Optional[SessionIndex]:
         return self.sessions.get(session_id)

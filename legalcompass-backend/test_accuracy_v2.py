@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.services.heuristic_engine import heuristic_engine
 from app.services.fairness_calculator import calculate_overall_fairness
+from app.services.rag_engine import rag_engine, is_global_risk_query, rank_risk_clauses, is_risk_bearing_clause
 from app.schemas.contract import Clause
 
 
@@ -598,9 +599,157 @@ def test_15_term_expiration_with_forfeiture():
     print("  ✓ Test 15: Term expiration with forfeiture scored HIGH")
 
 
+def test_16_global_risk_query_intent_detection():
+    """TEST 16 — Generic global risk/ranking intent detection."""
+    positive_queries = [
+        "What are the 5 most materially risky operative provisions in this contract?",
+        "What are the most materially risky clauses?",
+        "What are the highest risk provisions?",
+        "What are the top risks in this agreement?",
+        "List the worst clauses for me",
+        "Biggest risks in this contract",
+        "Major exposures in this agreement",
+        "Rank the riskiest provisions",
+        "Show me all high risk clauses",
+        "What should I be most worried about in this contract?",
+        "What are the top predatory terms?",
+        "Where is my biggest exposure?",
+        "Top 3 risks",
+        "What are the critical risks here?",
+    ]
+    for q in positive_queries:
+        assert is_global_risk_query(q) is True, f"Expected global risk intent for: '{q}'"
+
+    negative_queries = [
+        "Why is clause 3.1 high risk?",
+        "Explain section 4",
+        "What does clause 14 say about indemnification?",
+        "What happens if the client terminates early?",
+        "What is the governing law of this contract?",
+        "Can I subcontract my work under section 2?",
+        "Hello, how can you help me?",
+    ]
+    for q in negative_queries:
+        assert is_global_risk_query(q) is False, f"Expected non-global query for: '{q}'"
+
+    print("  ✓ Test 16: Generic global-risk intent detection accurately classifies queries")
+
+
+def test_17_global_risk_ranking_prefers_high_medium_over_low():
+    """TEST 17 — Global risk ranking prefers HIGH/MEDIUM over LOW/NEUTRAL."""
+    synthetic_clauses = [
+        Clause(id="c_def_1", title="1.1 Definitions — Scope", text="Scope defined.", risk_level="NEUTRAL", clause_kind="DEFINITION", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="c_def_2", title="1.2 Definitions — Deliverables", text="Deliverables defined.", risk_level="NEUTRAL", clause_kind="DEFINITION", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="c_head", title="2.0 PERFORMANCE TERMS", text="Section heading.", risk_level="NEUTRAL", clause_kind="HEADING", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="c_low_1", title="2.1 Delivery Timelines", text="Delivery within 30 days.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=15),
+        Clause(id="c_low_2", title="2.2 Status Reports", text="Monthly reporting.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=20),
+        Clause(id="c_med_1", title="3.1 Extended Payment Terms", text="Net 90 payment terms.", risk_level="MEDIUM", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=60),
+        Clause(id="c_med_2", title="3.2 Renewal Notice Window", text="90 day non-renewal notice window.", risk_level="MEDIUM", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=55),
+        Clause(id="c_high_1", title="4.1 Uncapped Indemnification", text="Contractor provides uncapped indemnity.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=92),
+        Clause(id="c_high_2", title="4.2 Immediate IP Assignment", text="Irrevocable immediate IP transfer.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=88),
+    ]
+
+    ranked = rank_risk_clauses(synthetic_clauses, limit=5)
+
+    # 1. No definitions or headings
+    for c in ranked:
+        assert c.clause_kind == "OPERATIVE", f"Definitions/headings must never be in ranked list: {c.title}"
+        assert c.is_risk_bearing is True, f"Non-risk-bearing clause in ranked list: {c.title}"
+
+    # 2. Top 2 must be the HIGH risk clauses
+    assert ranked[0].id == "c_high_1", f"Expected c_high_1 first, got {ranked[0].id}"
+    assert ranked[0].risk_level == "HIGH"
+    assert ranked[1].id == "c_high_2", f"Expected c_high_2 second, got {ranked[1].id}"
+    assert ranked[1].risk_level == "HIGH"
+
+    # 3. Next 2 must be the MEDIUM risk clauses
+    assert ranked[2].id == "c_med_1", f"Expected c_med_1 third, got {ranked[2].id}"
+    assert ranked[2].risk_level == "MEDIUM"
+    assert ranked[3].id == "c_med_2", f"Expected c_med_2 fourth, got {ranked[3].id}"
+    assert ranked[3].risk_level == "MEDIUM"
+
+    # 4. 5th clause is the higher unfairness LOW clause
+    assert ranked[4].id == "c_low_2", f"Expected c_low_2 fifth, got {ranked[4].id}"
+    assert ranked[4].risk_level == "LOW"
+
+    # 5. Verify LOW clauses never precede HIGH or MEDIUM
+    risk_weights = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NEUTRAL": 0}
+    weights = [risk_weights[c.risk_level] for c in ranked]
+    assert weights == sorted(weights, reverse=True), "Ranked list must be monotonically non-increasing by risk severity"
+
+    print("  ✓ Test 17: Global risk ranking strictly prefers HIGH/MEDIUM over LOW/NEUTRAL")
+
+
+def test_18_global_risk_excludes_definitions_even_if_selected():
+    """TEST 18 — Global risk query excludes definitions/headings even when passed as selected_clause_id."""
+    synthetic_clauses = [
+        Clause(id="def_1", title="1.1 Definitions — Scope", text="Definitions text.", risk_level="NEUTRAL", clause_kind="DEFINITION", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="op_high", title="2.1 Unlimited Liability Trap", text="Sole uncapped liability.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=95),
+        Clause(id="op_med", title="2.2 Unilateral Termination", text="Termination at will.", risk_level="MEDIUM", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=70),
+    ]
+
+    session_id = "test_sess_def_exclude"
+    rag_engine.index_document(session_id, "TestAgreement.pdf", synthetic_clauses)
+
+    query = "What are the 5 most materially risky operative provisions in this contract?"
+    context = rag_engine.retrieve_chat_context(session_id, query, selected_clause_id="def_1", k=5)
+
+    assert "def_1" not in [c.id for c in context], "def_1 must not be in the ranked risk context!"
+    assert [c.id for c in context] == ["op_high", "op_med"]
+    print("  ✓ Test 18: Definitions/headings excluded from global risk ranking even if selected")
+
+
+def test_19_normal_rag_preserved_for_specific_queries():
+    """TEST 19 — Specific clause/scenario questions preserve normal RAG behavior and selected clause context."""
+    synthetic_clauses = [
+        Clause(id="c_1", title="1.1 Preamble", text="Introductory text.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True),
+        Clause(id="c_2", title="1.2 Scope of Services", text="Consultant provides architecture design.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True),
+        Clause(id="c_3", title="1.3 Payment Deadlines", text="Client pays within 15 days.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True),
+        Clause(id="c_4", title="1.4 Uncapped Indemnification", text="Contractor uncapped indemnity.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=90),
+    ]
+
+    session_id = "test_sess_specific_rag"
+    rag_engine.index_document(session_id, "ServicesAgreement.pdf", synthetic_clauses)
+
+    specific_query = "What are the payment deadlines under Section 1.3?"
+    context = rag_engine.retrieve_chat_context(session_id, specific_query, selected_clause_id="c_3", k=3)
+
+    context_ids = [c.id for c in context]
+    assert "c_3" in context_ids, f"Expected selected clause c_3 in context, got {context_ids}"
+    assert "c_2" in context_ids or "c_4" in context_ids, "Expected adjacent neighbor in context"
+    print("  ✓ Test 19: Specific clause questions preserve focused RAG selection and neighboring context")
+
+
+def test_20_cannot_return_low_when_high_exists():
+    """TEST 20 — Proves a global 'top risks' query cannot return LOW/NEUTRAL when stronger canonical risk clauses exist."""
+    mixed_clauses = [
+        Clause(id="def_heading", title="1.0 DEFINITIONS", text="Definitions heading.", risk_level="NEUTRAL", clause_kind="HEADING", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="def_item", title="1.1 Definition — Affiliate", text="Means parent or subsidiary.", risk_level="NEUTRAL", clause_kind="DEFINITION", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="low_term", title="2.1 Term Duration", text="Agreement continues for 1 year.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=10),
+        Clause(id="low_conf", title="2.2 Confidentiality", text="Parties maintain standard confidentiality.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=15),
+        Clause(id="med_audit", title="3.1 Discretionary Audit", text="Client may audit contractor records upon 5 days notice.", risk_level="MEDIUM", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=60),
+        Clause(id="high_indem", title="4.1 Uncapped Indemnity Trap", text="Contractor irrevocably defends and indemnifies client without cap or fault.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=95),
+        Clause(id="high_ip", title="4.2 Immediate IP Forfeiture", text="Contractor assigns all IP immediately without condition of payment.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=90),
+    ]
+
+    session_id = "test_sess_preference_proof"
+    rag_engine.index_document(session_id, "VendorContract.pdf", mixed_clauses)
+
+    query = "What are the 5 most materially risky operative provisions in this contract?"
+    context = rag_engine.retrieve_chat_context(session_id, query, k=3)
+
+    retrieved_ids = [c.id for c in context]
+    assert retrieved_ids == ["high_indem", "high_ip", "med_audit"], f"Expected top risk clauses, got {retrieved_ids}"
+    assert "low_term" not in retrieved_ids, "LOW risk clause must NOT displace HIGH/MEDIUM risks"
+    assert "low_conf" not in retrieved_ids, "LOW risk clause must NOT displace HIGH/MEDIUM risks"
+    assert "def_heading" not in retrieved_ids, "HEADING must never be in risk ranking"
+    assert "def_item" not in retrieved_ids, "DEFINITION must never be in risk ranking"
+    print("  ✓ Test 20: Verified global top risks query CANNOT return LOW/NEUTRAL when stronger risk clauses exist")
+
+
 def main():
     print("================================================================")
-    print("ACCURACY V2.2 — GENERALIZED REGRESSION TEST SUITE")
+    print("ACCURACY V2.3 — GENERALIZED REGRESSION TEST SUITE")
     print("(Zero Hardcoding — All Synthetic Inline Text)")
     print("================================================================\n")
 
@@ -668,6 +817,26 @@ def main():
     ]
 
     for label, fn in tests_v2_2:
+        try:
+            fn()
+            passed += 1
+        except AssertionError as e:
+            print(f"  ✗ Test {label}: FAILED — {e}")
+            failed += 1
+        except Exception as e:
+            print(f"  ✗ Test {label}: ERROR — {e}")
+            failed += 1
+
+    print("\n--- Accuracy V2.3 Global Risk Ranking Tests (16 - 20) ---")
+    tests_v2_3 = [
+        ("16", test_16_global_risk_query_intent_detection),
+        ("17", test_17_global_risk_ranking_prefers_high_medium_over_low),
+        ("18", test_18_global_risk_excludes_definitions_even_if_selected),
+        ("19", test_19_normal_rag_preserved_for_specific_queries),
+        ("20", test_20_cannot_return_low_when_high_exists),
+    ]
+
+    for label, fn in tests_v2_3:
         try:
             fn()
             passed += 1
