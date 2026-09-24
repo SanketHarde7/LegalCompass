@@ -404,6 +404,134 @@ export interface ContractChatContext {
   }>;
 }
 
+export interface SSEEventHandlers {
+  onToken?: (token: string) => void;
+  onCitation?: (clauseIds: string[]) => void;
+  onSuggestion?: (counterClause: string) => void;
+  onDone?: () => void;
+}
+
+/**
+ * Robust Server-Sent Events (SSE) Stream Parser.
+ * Maintains a persistent buffer across chunk boundaries, splitting strictly on \n\n boundaries.
+ * Preserves incomplete trailing data until future chunks arrive.
+ * Prevents premature JSON parsing failures and silent token drops.
+ */
+export class SSEStreamParser {
+  private buffer: string = '';
+  private handlers: SSEEventHandlers;
+
+  constructor(handlers: SSEEventHandlers) {
+    this.handlers = handlers;
+  }
+
+  /**
+   * Feed a new text chunk (decoded from stream) into the buffer and process all complete events.
+   */
+  public feed(chunk: string): void {
+    this.buffer += chunk;
+    this.processBuffer();
+  }
+
+  /**
+   * Process all complete SSE events (bounded by double newline \n\n or \r\n\r\n).
+   */
+  private processBuffer(): void {
+    while (true) {
+      const match = this.buffer.match(/\r?\n\r?\n/);
+      if (!match || match.index === undefined) {
+        break; // Incomplete trailing event, keep in buffer until next chunk
+      }
+
+      const boundaryIndex = match.index;
+      const delimiterLength = match[0].length;
+      const eventBlock = this.buffer.slice(0, boundaryIndex);
+      this.buffer = this.buffer.slice(boundaryIndex + delimiterLength);
+
+      this.parseEventBlock(eventBlock);
+    }
+  }
+
+  /**
+   * Parses an individual complete event block.
+   */
+  private parseEventBlock(eventBlock: string): void {
+    const trimmed = eventBlock.trim();
+    if (!trimmed) {
+      return; // Ignore empty keep-alive pings or stray delimiters
+    }
+
+    const lines = eventBlock.split(/\r?\n/);
+    const dataLines: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith(':')) {
+        // SSE comment/heartbeat, ignore
+        continue;
+      }
+      if (line.startsWith('data:')) {
+        // Support both "data: payload" and "data:payload"
+        const content = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
+        dataLines.push(content);
+      }
+    }
+
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    const dataPayload = dataLines.join('\n').trim();
+    if (!dataPayload) {
+      return;
+    }
+
+    if (dataPayload === '[DONE]') {
+      this.handlers.onDone?.();
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(dataPayload);
+      if (parsed.type === 'token' && typeof parsed.content === 'string') {
+        const cleanToken = parsed.content.replace(/\[CITE:[a-zA-Z0-9_-]+\]/g, '');
+        if (cleanToken && this.handlers.onToken) {
+          this.handlers.onToken(cleanToken);
+        }
+      } else if (parsed.type === 'citation' && Array.isArray(parsed.clause_ids)) {
+        if (this.handlers.onCitation) {
+          this.handlers.onCitation(parsed.clause_ids);
+        }
+      } else if (parsed.type === 'suggestion' && typeof parsed.counter_clause === 'string') {
+        if (this.handlers.onSuggestion) {
+          this.handlers.onSuggestion(parsed.counter_clause);
+        }
+      } else if (parsed.type === 'done') {
+        this.handlers.onDone?.();
+      }
+    } catch (err) {
+      console.warn('Malformed SSE event payload failed to parse as JSON:', dataPayload, err);
+    }
+  }
+
+  /**
+   * Flushes any remaining data in the buffer when the stream has ended.
+   */
+  public flush(): void {
+    this.processBuffer();
+    if (this.buffer.trim()) {
+      this.parseEventBlock(this.buffer);
+      this.buffer = '';
+    }
+  }
+
+  /**
+   * Returns current internal buffer (useful for inspection/tests).
+   */
+  public getBuffer(): string {
+    return this.buffer;
+  }
+}
+
 export async function sendChatMessage(
   sessionId: string,
   message: string,
@@ -449,40 +577,39 @@ export async function sendChatMessage(
     const triggeredClauseIds: string[] = [];
     let counterProposal: string | undefined = undefined;
 
+    const sseParser = new SSEStreamParser({
+      onToken: (cleanToken: string) => {
+        accumulatedContent += cleanToken;
+        onToken(cleanToken);
+      },
+      onCitation: (ids: string[]) => {
+        triggeredClauseIds.push(...ids);
+        if (onCitation) {
+          onCitation(ids);
+        }
+      },
+      onSuggestion: (counterClause: string) => {
+        counterProposal = counterClause;
+      },
+      onDone: () => {
+        // Stream completed
+      },
+    });
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       const chunkStr = decoder.decode(value, { stream: true });
-      const lines = chunkStr.split('\n');
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === '[DONE]') break;
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            if (parsed.type === 'token' && typeof parsed.content === 'string') {
-              const cleanToken = parsed.content.replace(/\[CITE:[a-zA-Z0-9_-]+\]/g, '');
-              accumulatedContent += cleanToken;
-              if (cleanToken) {
-                onToken(cleanToken);
-              }
-            } else if (parsed.type === 'citation' && Array.isArray(parsed.clause_ids)) {
-              triggeredClauseIds.push(...parsed.clause_ids);
-              if (onCitation) {
-                onCitation(parsed.clause_ids);
-              }
-            } else if (parsed.type === 'suggestion' && typeof parsed.counter_clause === 'string') {
-              counterProposal = parsed.counter_clause;
-            }
-          } catch {
-            // Ignore partial chunk boundaries
-          }
-        }
-      }
+      sseParser.feed(chunkStr);
     }
+
+    // Flush any remaining characters from the decoder and parser
+    const finalChunk = decoder.decode();
+    if (finalChunk) {
+      sseParser.feed(finalChunk);
+    }
+    sseParser.flush();
 
     const finalCleaned = (accumulatedContent || 'Analysis completed.')
       .replace(/\[CITE:[a-zA-Z0-9_-]+\]/g, '')
