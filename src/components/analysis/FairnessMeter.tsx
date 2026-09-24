@@ -22,7 +22,10 @@ export const FairnessMeter: React.FC<FairnessMeterProps> = ({
   let containerStyle = 'bg-rose-50/60 border border-rose-200 text-rose-900';
   let barColor = 'bg-rose-500';
   let Icon = AlertTriangle;
-  let headline = `⚠️ High Risk: ${highRisks} Critical ${highRisks === 1 ? 'Trap' : 'Traps'} Found in this Agreement`;
+  let headline =
+    highRisks > 0
+      ? `⚠️ High Risk: ${highRisks} Critical ${highRisks === 1 ? 'Trap' : 'Traps'} Found in this Agreement`
+      : '⚠️ High Risk: Substantive Imbalances Found in this Agreement';
   let subtext = 'Predatory provisions detected. Key liabilities and exit terms require immediate revision.';
 
   if (clampedScore >= 75) {

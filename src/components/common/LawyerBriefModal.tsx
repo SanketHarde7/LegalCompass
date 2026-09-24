@@ -32,8 +32,8 @@ export const LawyerBriefModal: React.FC<LawyerBriefModalProps> = ({ isOpen, onCl
   if (!isOpen || !document) return null;
 
   const clauses = document.clauses;
-  const highRiskClauses = clauses.filter((c) => c.riskLevel === 'HIGH');
-  const mediumRiskClauses = clauses.filter((c) => c.riskLevel === 'MEDIUM');
+  const highRiskClauses = clauses.filter((c) => c.riskLevel === 'HIGH' && c.isRiskBearing !== false);
+  const mediumRiskClauses = clauses.filter((c) => c.riskLevel === 'MEDIUM' && c.isRiskBearing !== false);
   const score = document.overallFairnessScore;
 
   const currentDate = new Date().toLocaleDateString('en-US', {

@@ -8,8 +8,8 @@ export const DocumentPanel: React.FC = () => {
   const document = useAppStore((state) => state.document);
 
   const clauses = document?.clauses ?? [];
-  const highRisksCount = clauses.filter((c) => c.riskLevel === 'HIGH').length;
-  const mediumRisksCount = clauses.filter((c) => c.riskLevel === 'MEDIUM').length;
+  const highRisksCount = clauses.filter((c) => c.riskLevel === 'HIGH' && c.isRiskBearing !== false).length;
+  const mediumRisksCount = clauses.filter((c) => c.riskLevel === 'MEDIUM' && c.isRiskBearing !== false).length;
 
   if (!document) {
     return (

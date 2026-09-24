@@ -37,23 +37,52 @@ export interface AppState {
   resetSession: () => void;
 }
 
+export function isRiskBearingClause(c: {
+  isRiskBearing?: boolean;
+  clauseKind?: string;
+  riskLevel?: string;
+}): boolean {
+  if (c.isRiskBearing === false) return false;
+  const kind = (c.clauseKind || '').toUpperCase();
+  if (kind === 'DEFINITION' || kind === 'HEADING' || kind === 'RECITAL' || kind === 'BOILERPLATE') {
+    return false;
+  }
+  if (c.riskLevel === 'NEUTRAL') return false;
+  return c.isRiskBearing === true || c.riskLevel === 'HIGH' || c.riskLevel === 'MEDIUM';
+}
+
 function generateAuditGreeting(doc: ContractDocument): ChatMessage {
-  const highRisks = doc.clauses.filter((c) => c.riskLevel === 'HIGH');
-  let topTraps = 'key liability terms and unilateral exit penalties';
+  const highRisks = doc.clauses.filter(
+    (c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c)
+  );
+  const mediumRisks = doc.clauses.filter(
+    (c) => c.riskLevel === 'MEDIUM' && isRiskBearingClause(c)
+  );
+
+  let riskDescription = '';
+  let triggeredIds: string[] = [];
+
   if (highRisks.length >= 2) {
-    topTraps = `"${highRisks[0].title}" and "${highRisks[1].title}"`;
+    riskDescription = `Key high-risk areas include **"${highRisks[0].title}"** and **"${highRisks[1].title}"**.`;
+    triggeredIds = highRisks.map((c) => c.id);
   } else if (highRisks.length === 1) {
-    topTraps = `"${highRisks[0].title}"`;
-  } else if (doc.clauses.length > 0) {
-    topTraps = doc.clauses.slice(0, 2).map((c) => `"${c.title}"`).join(' and ');
+    riskDescription = `A key high-risk area includes **"${highRisks[0].title}"**.`;
+    triggeredIds = [highRisks[0].id];
+  } else if (mediumRisks.length > 0) {
+    const medTitles = mediumRisks.slice(0, 2).map((c) => `"${c.title}"`).join(' and ');
+    riskDescription = `No critical high-risk traps were detected. Moderate risk provisions to review include **${medTitles}**.`;
+    triggeredIds = mediumRisks.slice(0, 2).map((c) => c.id);
+  } else {
+    riskDescription = 'No critical high-risk traps were detected. The audited operative provisions appear standard and balanced.';
+    triggeredIds = [];
   }
 
   return {
     id: `msg_audit_${Date.now()}`,
     role: 'assistant',
-    content: `I have completed an audit of **${doc.filename}**.\n\nKey high-risk areas include **${topTraps}**.\n\nYou can click any **Simulate Scenario** button on the left, pick a quick question below, or type your own what-if scenario to see how this agreement behaves under pressure.`,
+    content: `I have completed an audit of **${doc.filename}**.\n\n${riskDescription}\n\nYou can click any **Simulate Scenario** button on the left, pick a quick question below, or type your own what-if scenario to see how this agreement behaves under pressure.`,
     timestamp: new Date().toISOString(),
-    triggeredClauseIds: highRisks.map((c) => c.id),
+    triggeredClauseIds: triggeredIds,
   };
 }
 
@@ -73,11 +102,16 @@ export const useAppStore = create<AppState>((set) => ({
   setViewMode: (mode) => set({ activeViewMode: mode }),
   loadMockDocument: () => {
     const greeting = generateAuditGreeting(mockFreelanceDocument);
+    const firstRiskBearing =
+      mockFreelanceDocument.clauses.find((c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c))?.id ??
+      mockFreelanceDocument.clauses.find((c) => isRiskBearingClause(c))?.id ??
+      null;
+
     set({
       document: mockFreelanceDocument,
       activePresetKey: 'freelance',
       chatMessages: [greeting],
-      selectedClauseId: 'clause_ip', // Default to first high-risk clause
+      selectedClauseId: firstRiskBearing,
       activeRiskFilter: 'ALL',
       isUploading: false,
       isStreaming: false,
@@ -87,13 +121,17 @@ export const useAppStore = create<AppState>((set) => ({
   loadPreset: (key: PresetKey) => {
     const doc = MOCK_PRESETS[key];
     const greeting = generateAuditGreeting(doc);
-    const firstHighRisk = doc.clauses.find((c) => c.riskLevel === 'HIGH')?.id ?? doc.clauses[0]?.id ?? null;
+    const firstRiskBearing =
+      doc.clauses.find((c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c))?.id ??
+      doc.clauses.find((c) => c.riskLevel === 'MEDIUM' && isRiskBearingClause(c))?.id ??
+      doc.clauses.find((c) => isRiskBearingClause(c))?.id ??
+      null;
 
     set({
       document: doc,
       activePresetKey: key,
       chatMessages: [greeting],
-      selectedClauseId: firstHighRisk,
+      selectedClauseId: firstRiskBearing,
       activeRiskFilter: 'ALL',
       isUploading: false,
       isStreaming: false,
@@ -112,9 +150,12 @@ export const useAppStore = create<AppState>((set) => ({
       return;
     }
 
+    // Select the first genuinely risk-bearing clause (HIGH first, then MEDIUM, then any risk-bearing)
+    // If none are risk-bearing, selectedClauseId should be null
     const initialClauseId =
-      document.clauses.find((c) => c.riskLevel === 'HIGH')?.id ??
-      document.clauses[0]?.id ??
+      document.clauses.find((c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c))?.id ??
+      document.clauses.find((c) => c.riskLevel === 'MEDIUM' && isRiskBearingClause(c))?.id ??
+      document.clauses.find((c) => isRiskBearingClause(c))?.id ??
       null;
 
     const initialMessages: ChatMessage[] = [generateAuditGreeting(document)];

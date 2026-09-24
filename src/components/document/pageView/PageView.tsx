@@ -21,7 +21,7 @@ export const PageView: React.FC = () => {
   const riskPages = Array.from(
     new Set(
       clauses
-        .filter((c) => c.riskLevel === 'HIGH')
+        .filter((c) => c.riskLevel === 'HIGH' && c.isRiskBearing !== false)
         .map((c) => c.pageNumber ?? 1)
     )
   );

@@ -32,10 +32,12 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     // Strictly highlight ONLY clauses that represent actual risk issues or active selection
     const issueClauses = pageClauses.filter(
       (c) =>
-        c.riskLevel === 'HIGH' ||
-        c.riskLevel === 'MEDIUM' ||
-        (c.unfairnessScore ?? 0) >= 50 ||
-        c.id === selectedClauseId
+        c.isRiskBearing !== false &&
+        c.riskLevel !== 'NEUTRAL' &&
+        (c.riskLevel === 'HIGH' ||
+          c.riskLevel === 'MEDIUM' ||
+          (c.unfairnessScore ?? 0) >= 50 ||
+          c.id === selectedClauseId)
     );
 
     if (issueClauses.length === 0 || !text) {
