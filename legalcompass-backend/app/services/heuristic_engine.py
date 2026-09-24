@@ -18,7 +18,22 @@ test contract, or contract-specific exceptions.
 """
 
 import re
-from typing import NamedTuple, Optional, List
+from dataclasses import dataclass
+from typing import NamedTuple, Optional, List, Any, Dict, Tuple
+
+
+@dataclass
+class ResolvedReference:
+    target_clause: Any
+    reference_label: str  # e.g., "Section 4" or "4"
+    relation: str  # "expands" | "limits" | "overrides" | "mitigates" | "unrelated"
+    explanation: str
+
+
+def _get_clause_attr(c: Any, attr: str, default: Any = "") -> Any:
+    if isinstance(c, dict):
+        return c.get(attr, default)
+    return getattr(c, attr, default)
 
 
 class HeuristicAssessment(NamedTuple):
@@ -125,12 +140,83 @@ class HeuristicEngine:
         re.IGNORECASE,
     )
 
+    # Substantive operative consequence indicators
+    RE_SUBSTANTIVE_CONSEQUENCE = re.compile(
+        r"\b(?:"
+        r"reimburse(?:ment|s)?|pay(?:s|ment|ing)?|invoic(?:e|ing|es)?|fees?|expenses?|compensation|"
+        r"assign(?:s|ment|ing)?|transfers?|grant(?:s|ing)?\s+(?:a\s+)?license|work\s+made\s+for\s+hire|"
+        r"indemnif(?:y|ies|ication)|hold\s+harmless|defend\s+against|"
+        r"terminat(?:e|es|ion|ing)|cancel(?:s|lation)?|renew(?:s|al)?|"
+        r"liab(?:le|ility)|damages?|penalt(?:y|ies)|forfeit(?:s|ure|ing)?|liquidated\s+damages|default|"
+        r"injuncti(?:on|ve)|specific\s+performance|remed(?:y|ies)|breach|"
+        r"waiv(?:e|es|ed|ing)\s+(?:any\s+)?(?:right|claim|defense|jury|trial|counterclaim|compensation)|"
+        r"shall\s+not|must\s+not|may\s+not|prohibited\s+from|restricted\s+from|refrain\s+from|will\s+not"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Covenant / duty verbs
+    RE_COVENANT_VERBS = re.compile(
+        r"\b(?:shall|must|agrees?\s+to|hereby\s+agrees?|covenants?\s+to|is\s+required\s+to|entitled\s+to|has\s+the\s+right\s+to)\b",
+        re.IGNORECASE,
+    )
+
+    # Pure administrative boilerplate patterns (without substantive legal consequence)
+    RE_PURE_GOVERNING_LAW = re.compile(
+        r"\b(?:governed\s+by|construed\s+in\s+accordance\s+with|laws\s+of\s+(?:the\s+State\s+of\s+)?[A-Z]|choice\s+of\s+law|"
+        r"jurisdiction\s+of\s+the\s+courts?|exclusive\s+venue)\b",
+        re.IGNORECASE,
+    )
+
+    RE_PURE_NOTICES = re.compile(
+        r"\b(?:notices?\s+(?:shall|must|may)\s+be\s+(?:in\s+writing|given|delivered|sent|deemed\s+given)|"
+        r"addressed\s+to\s+the\s+(?:parties|addresses|preamble))\b",
+        re.IGNORECASE,
+    )
+
+    RE_PURE_SEVERABILITY = re.compile(
+        r"\b(?:severability|if\s+any\s+provision.*(?:invalid|illegal|unenforceable)|"
+        r"remaining\s+provisions\s+shall\s+continue)\b",
+        re.IGNORECASE,
+    )
+
+    RE_PURE_COUNTERPARTS = re.compile(
+        r"\b(?:counterparts|facsimile|electronic\s+signature|executed\s+in.*counterparts)\b",
+        re.IGNORECASE,
+    )
+
+    RE_PURE_ENTIRE_AGREEMENT = re.compile(
+        r"\b(?:entire\s+agreement|merger\s+clause|supersedes?\s+all\s+prior\s+(?:agreements|understandings|negotiations))\b",
+        re.IGNORECASE,
+    )
+
+    RE_PURE_CROSS_REF_BODY = re.compile(
+        r"^\s*(?:as\s+defined\s+in|see|refer\s+to|capitalized\s+terms.*meanings?\s+(?:assigned|set\s+forth)\s+in)\s+(?:Section|Clause|Article)\s+[0-9IVXLCDM]+",
+        re.IGNORECASE,
+    )
+
+    # Cross-reference mention detector & label extraction
+    RE_CROSS_REF_MENTION = re.compile(
+        r"\b(?:Section|Clause|Article|subsection|Paragraph)\s+([0-9]+(?:\.[0-9]+)*|[IVXLCDM]+)\b",
+        re.IGNORECASE,
+    )
+
+    RE_CLAUSE_LABEL = re.compile(
+        r"^(?:Section|Clause|Article|subsection|Paragraph)?\s*([0-9]+(?:\.[0-9]+)*|[IVXLCDM]+)\b",
+        re.IGNORECASE,
+    )
+
     # =========================================================================
     # Public API
     # =========================================================================
 
-    def evaluate_clause(self, title: str, text: str) -> HeuristicAssessment:
-        """Evaluates clause text using structural pre-screening + semantic analysis."""
+    def evaluate_clause(
+        self,
+        title: str,
+        text: str,
+        all_clauses: Optional[List[Any]] = None,
+    ) -> HeuristicAssessment:
+        """Evaluates clause text using structural pre-screening + semantic analysis + cross-reference resolution."""
         full_text = f"{title}\n{text}".strip()
         body_lower = text.lower()
 
@@ -161,6 +247,18 @@ class HeuristicEngine:
         is_negated = bool(self.RE_NEGATION.search(body_lower))
         is_reciprocal = bool(self.RE_RECIPROCAL.search(body_lower))
         has_mitigation = self._check_mitigation(body_lower)
+
+        # Dynamic cross-reference resolution against active document clauses
+        resolved_refs: List[ResolvedReference] = []
+        if all_clauses:
+            resolved_refs = self.resolve_referenced_clauses({"title": title, "text": text}, all_clauses)
+            for ref in resolved_refs:
+                if ref.relation in ("mitigates", "limits"):
+                    target_text_lower = str(_get_clause_attr(ref.target_clause, "text", "")).lower()
+                    target_mit = self._check_mitigation(target_text_lower)
+                    for k, v in target_mit.items():
+                        if v:
+                            has_mitigation[k] = True
 
         # Negation fast paths
         if is_negated:
@@ -236,61 +334,228 @@ class HeuristicEngine:
         text_stripped = text.strip()
         body_words = len(text_stripped.split())
 
-        # ── RECITAL ──
+        # ── 1. RECITAL ──
         if self.RE_RECITAL.match(text_stripped) or self.RE_RECITAL.match(title):
             return "RECITAL"
 
-        # ── DEFINITION ──
+        # ── 2. DEFINITION ──
         is_def_title = any(kw in title_lower for kw in ["definitions", "defined terms", "interpretation"])
         has_definition_body = bool(re.match(
             r'^\s*(?:\d+\.\d+\s+)?["\'\u2018\u2019\u201c\u201d]([^"\'\u2018\u2019\u201c\u201d]+)["\'\u2018\u2019\u201c\u201d]\s+(?:means|shall\s+mean|refers\s+to|includes)',
             text_stripped, re.IGNORECASE
         ))
         if is_def_title or has_definition_body:
-            # Only classify as DEFINITION if no operative trap is hidden inside
-            if not self.RE_OPERATIVE_TRAP.search(text):
+            # Only classify as DEFINITION if genuinely definitional and non-operative
+            if not self.RE_OPERATIVE_TRAP.search(text_stripped):
                 return "DEFINITION"
+            return "OPERATIVE"
 
-        # ── HEADING ──
-        # A heading has a title but very little substantive body text
-        # Remove the title text from body to measure actual content
+        # ── 3. HEADING (only when no substantive body exists) ──
         body_without_title = text_stripped
         if title.strip() and body_without_title.lower().startswith(title_lower):
             body_without_title = body_without_title[len(title):].strip()
         body_content_words = len(body_without_title.split())
-        # Short text is a HEADING unless it contains operative language
         has_operative_verbs = bool(re.search(
             r'\b(?:shall|must|agrees?\s+to|may\s+not|will\s+not|hereby|obligat|waive|forfeit|assign|indemn|terminat|liable)\b',
             body_without_title, re.IGNORECASE
         ))
-        if body_content_words < 10 and not has_operative_verbs and not self.RE_OPERATIVE_TRAP.search(text):
+        is_pure_heading = (
+            text_stripped.lower() == title_lower
+            or body_content_words == 0
+            or (body_content_words <= 3 and not self._is_pure_boilerplate(title, text_stripped))
+        )
+        if is_pure_heading and not has_operative_verbs and not self.RE_OPERATIVE_TRAP.search(text_stripped):
             return "HEADING"
 
-        # ── BOILERPLATE ──
-        boilerplate_hits = len(self.RE_BOILERPLATE.findall(text_stripped))
-        is_pure_crossref = bool(self.RE_CROSS_REFERENCE.search(text_stripped)) and body_words < 30
-        if (boilerplate_hits >= 2 or is_pure_crossref) and not self.RE_OPERATIVE_TRAP.search(text):
+        # ── 4. OPERATIVE ──
+        if self._is_operative_clause(title, text_stripped):
+            return "OPERATIVE"
+
+        # ── 5. BOILERPLATE ──
+        if self._is_pure_boilerplate(title, text_stripped):
             return "BOILERPLATE"
 
         return "OPERATIVE"
 
+    def _is_pure_boilerplate(self, title: str, text: str) -> bool:
+        """Checks if a clause is purely administrative boilerplate with NO substantive covenants."""
+        full_text = f"{title}\n{text}".strip()
+        body_stripped = text.strip()
+
+        # If it contains any substantive consequences or operative traps, it CANNOT be pure boilerplate
+        if self.RE_OPERATIVE_TRAP.search(full_text) or self.RE_SUBSTANTIVE_CONSEQUENCE.search(full_text):
+            return False
+
+        # Check pure boilerplate categories
+        if self.RE_PURE_GOVERNING_LAW.search(full_text):
+            return True
+        if self.RE_PURE_NOTICES.search(full_text):
+            return True
+        if self.RE_PURE_SEVERABILITY.search(full_text):
+            return True
+        if self.RE_PURE_COUNTERPARTS.search(full_text):
+            return True
+        if self.RE_PURE_ENTIRE_AGREEMENT.search(full_text):
+            return True
+        if self.RE_PURE_CROSS_REF_BODY.search(body_stripped):
+            return True
+        if self.RE_CROSS_REFERENCE.search(body_stripped) and len(body_stripped.split()) < 40:
+            return True
+        if len(self.RE_BOILERPLATE.findall(full_text)) >= 1:
+            return True
+
+        return False
+
+    def _is_operative_clause(self, title: str, text: str) -> bool:
+        """Determines if a clause contains substantive operative covenants or obligations."""
+        full_text = f"{title}\n{text}".strip()
+
+        # Operative trap is always operative
+        if self.RE_OPERATIVE_TRAP.search(full_text):
+            return True
+
+        # Substantive consequence is operative
+        if self.RE_SUBSTANTIVE_CONSEQUENCE.search(full_text):
+            return True
+
+        # Covenant verbs (shall, must, agrees to) are operative UNLESS pure administrative boilerplate
+        if self.RE_COVENANT_VERBS.search(full_text):
+            if self._is_pure_boilerplate(title, text):
+                return False
+            return True
+
+        return False
+
     def _determine_risk_bearing(self, clause_kind: str, text: str) -> bool:
         """Determines if a clause can carry material risk.
 
-        Non-operative clause types (DEFINITION, HEADING, RECITAL) are not risk-bearing
-        UNLESS they contain an operative trap pattern (e.g., "hereby irrevocably assigns"
-        embedded inside a definition).
+        Non-operative clause types (DEFINITION, HEADING, RECITAL, BOILERPLATE) are not risk-bearing
+        UNLESS they contain an operative trap pattern.
         """
-        if clause_kind in ("DEFINITION", "HEADING", "RECITAL"):
-            # Override: if an operative trap pattern is found, the clause IS risk-bearing
+        if clause_kind in ("DEFINITION", "HEADING", "RECITAL", "BOILERPLATE"):
             return bool(self.RE_OPERATIVE_TRAP.search(text))
-
-        if clause_kind == "BOILERPLATE":
-            # Boilerplate is generally not risk-bearing unless it has an operative trap
-            return bool(self.RE_OPERATIVE_TRAP.search(text))
-
-        # OPERATIVE clauses are always risk-bearing
         return True
+
+    # =========================================================================
+    # Cross-Reference Resolution
+    # =========================================================================
+
+    def resolve_referenced_clauses(
+        self,
+        current_clause: Any,
+        all_clauses: Optional[List[Any]] = None,
+    ) -> List[ResolvedReference]:
+        """Dynamically identifies and resolves explicit cross-references (e.g. Section X, Clause Y)
+        in current_clause against all_clauses parsed from the active document.
+
+        Returns only confidently resolved references. Never guesses or fabricates target clauses.
+        """
+        if not all_clauses:
+            return []
+
+        text = str(_get_clause_attr(current_clause, "text", "")).strip()
+        if not text:
+            return []
+
+        # Find explicit reference mentions
+        matches = self.RE_CROSS_REF_MENTION.findall(text)
+        if not matches:
+            return []
+
+        # Index all_clauses by normalized label
+        current_id = str(_get_clause_attr(current_clause, "id", ""))
+        label_index: Dict[str, Any] = {}
+        for c in all_clauses:
+            cid = str(_get_clause_attr(c, "id", ""))
+            if current_id and cid == current_id:
+                continue
+
+            c_label = self._extract_clause_label(c)
+            if c_label:
+                norm_label = c_label.lower().strip()
+                if norm_label not in label_index:
+                    label_index[norm_label] = c
+
+        resolved: List[ResolvedReference] = []
+        seen_targets = set()
+
+        for raw_ref in matches:
+            norm_ref = raw_ref.lower().strip().rstrip(".")
+            target_clause = label_index.get(norm_ref)
+            if not target_clause:
+                continue
+
+            target_id = str(_get_clause_attr(target_clause, "id", "")) or norm_ref
+            if target_id in seen_targets:
+                continue
+            seen_targets.add(target_id)
+
+            relation, explanation = self._determine_reference_relation(text, raw_ref, target_clause)
+            resolved.append(
+                ResolvedReference(
+                    target_clause=target_clause,
+                    reference_label=f"Section {raw_ref}",
+                    relation=relation,
+                    explanation=explanation,
+                )
+            )
+
+        return resolved
+
+    def _extract_clause_label(self, clause: Any) -> Optional[str]:
+        """Extracts numbering/label from title or start of text without hardcoding."""
+        title = str(_get_clause_attr(clause, "title", "")).strip()
+        text = str(_get_clause_attr(clause, "text", "")).strip()
+
+        # Check title first
+        m = self.RE_CLAUSE_LABEL.match(title)
+        if m:
+            return m.group(1).rstrip(".")
+
+        # Check start of text
+        m_text = self.RE_CLAUSE_LABEL.match(text[:60])
+        if m_text:
+            return m_text.group(1).rstrip(".")
+
+        return None
+
+    def _determine_reference_relation(
+        self,
+        source_text: str,
+        ref_label: str,
+        target_clause: Any,
+    ) -> Tuple[str, str]:
+        """Analyzes relation between source clause and target clause:
+        overrides | limits | mitigates | expands | unrelated
+        """
+        pattern = re.compile(
+            rf"(?:.{{0,80}})?\b(?:Section|Clause|Article|subsection|Paragraph)\s+{re.escape(ref_label)}\b(?:.{{0,80}})?",
+            re.IGNORECASE,
+        )
+        m = pattern.search(source_text)
+        window = m.group(0).lower() if m else source_text.lower()
+
+        # 1. Overrides
+        if any(w in window for w in ["conflict", "inconsistency", "prevail", "supersede", "override", "govern", "notwithstanding"]):
+            return "overrides", f"Current clause overrides or takes precedence over Section {ref_label}."
+
+        # 2. Limits / Mitigates
+        target_text_lower = str(_get_clause_attr(target_clause, "text", "")).lower()
+        has_mitigating_language = any(
+            pat.search(target_text_lower)
+            for pat in [self.RE_MITIGATION_CAPS, self.RE_MITIGATION_CURE, self.RE_RECIPROCAL]
+        )
+        if any(w in window for w in ["subject to", "except as", "unless otherwise", "conditioned upon", "capped by", "provided that", "in accordance with"]):
+            if has_mitigating_language:
+                return "mitigates", f"Section {ref_label} provides mitigating protective terms (e.g. liability cap, cure period, or mutuality)."
+            return "limits", f"Current clause is subject to or limited by Section {ref_label}."
+
+        # 3. Expands
+        if any(w in window for w in ["in addition to", "together with", "including without limitation", "as well as", "cumulative to"]):
+            return "expands", f"Current clause expands obligations in conjunction with Section {ref_label}."
+
+        # 4. Unrelated / Definitional
+        return "unrelated", f"Standard reference to Section {ref_label}."
 
     # =========================================================================
     # Step 2: Mitigation Detection
@@ -664,5 +929,73 @@ class HeuristicEngine:
             risk_reasons=[],
         )
 
+    # =========================================================================
+    # Triple-Gate Validation
+    # =========================================================================
+
+    def passes_triple_gate(
+        self,
+        title: str,
+        text: str,
+        assessment: Optional[HeuristicAssessment] = None,
+    ) -> bool:
+        """Determines whether a clause satisfies all 3 gates for HIGH risk:
+        Gate 1: Material consequence (substantive legal/financial exposure)
+        Gate 2: Meaningful imbalance/asymmetry (unilateral, uncapped, unconditional)
+        Gate 3: Insufficient mitigation (no caps, no mutuality, no cure period)
+
+        All three gates must be satisfied for a clause to be legitimately HIGH risk.
+        """
+        full_text = f"{title}\n{text}".strip()
+        body_lower = text.lower()
+
+        # Gate 1: Material consequence
+        has_material_consequence = bool(
+            self.RE_OPERATIVE_TRAP.search(full_text)
+            or any(k in body_lower for k in [
+                "indemn", "hold harmless", "defend and hold",
+                "irrevocably assign", "work made for hire", "immediately upon creation",
+                "uncapped", "without limitation or cap",
+                "forfeit", "forfeiture",
+                "waive all claims", "waives all rights",
+                "supersede", "prevail over this agreement",
+            ])
+            or (any(k in body_lower for k in ["terminate", "termination"]) and any(k in body_lower for k in ["immediate", "forfeiture", "without notice"]))
+            or (any(k in body_lower for k in ["invoice", "payment"]) and any(k in body_lower for k in ["net 90", "net-90", "withhold all", "unilateral setoff"]))
+        )
+        if not has_material_consequence:
+            return False
+
+        # Gate 2: Meaningful imbalance
+        is_reciprocal = bool(self.RE_RECIPROCAL.search(body_lower))
+        is_unilateral = bool(re.search(
+            r"\b(?:contractor\s+shall|tenant\s+shall|client\s+may|landlord\s+may|solely\s+by|sole\s+discretion|"
+            r"unilateral|without\s+contractor|without\s+tenant|at\s+client's\s+option)\b",
+            body_lower, re.IGNORECASE
+        )) or not is_reciprocal
+        if not is_unilateral:
+            return False
+
+        # Gate 3: Insufficient mitigation
+        mitigation = self._check_mitigation(body_lower)
+        if mitigation["has_cap"] or mitigation["has_mutuality"]:
+            return False
+        if "assign" in body_lower and mitigation["has_condition"]:
+            return False
+        if ("terminate" in body_lower or "termination" in body_lower) and mitigation["has_cure_period"]:
+            return False
+
+        return True
+
 
 heuristic_engine = HeuristicEngine()
+
+
+def resolve_referenced_clauses(current_clause: Any, all_clauses: Optional[List[Any]] = None) -> List[ResolvedReference]:
+    """Module-level convenience wrapper for heuristic_engine.resolve_referenced_clauses."""
+    return heuristic_engine.resolve_referenced_clauses(current_clause, all_clauses)
+
+
+def passes_triple_gate(title: str, text: str, assessment: Optional[HeuristicAssessment] = None) -> bool:
+    """Module-level convenience wrapper for heuristic_engine.passes_triple_gate."""
+    return heuristic_engine.passes_triple_gate(title, text, assessment)

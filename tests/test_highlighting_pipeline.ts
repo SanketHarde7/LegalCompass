@@ -14,9 +14,7 @@
 import { mapBackendClause, mapBackendContractDocument } from '../src/services/api';
 import {
   validateOffsets,
-  findSafeNormalizedSpan,
   resolveClauseHighlightSpan,
-  normalizeWithMapping,
 } from '../src/components/document/pageView/pageCanvasHelpers';
 import type { Clause } from '../src/types/contract';
 

@@ -298,6 +298,61 @@ class LLMService:
         return None
 
     # =========================================================================
+    # Chat Canonical Context Formatting
+    # =========================================================================
+    def format_chat_clause(self, c: Clause) -> str:
+        """Formats a single clause into canonical structured format for chat context."""
+        cid = getattr(c, "id", "clause")
+        title = getattr(c, "title", "Untitled Clause")
+        kind = getattr(c, "clause_kind", "OPERATIVE")
+        risk_bearing = getattr(c, "is_risk_bearing", True)
+        risk_level = getattr(c, "risk_level", "LOW")
+        unfairness = getattr(c, "unfairness_score", 30)
+        category = getattr(c, "category", "OTHER")
+        text = getattr(c, "text", "")
+        summary = getattr(c, "plain_english_summary", "") or getattr(c, "plainSummary", "")
+        reasons_list = getattr(c, "risk_reasons", []) or []
+
+        if reasons_list:
+            reasons_str = "\n".join(f"- {r}" for r in reasons_list)
+        else:
+            reasons_str = "- None (Standard or balanced provision)"
+
+        return (
+            f"[{cid}]\n"
+            f"Title: {title}\n"
+            f"Kind: {kind}\n"
+            f"Risk Bearing: {str(risk_bearing).lower()}\n"
+            f"Risk Level: {risk_level}\n"
+            f"Unfairness Score: {unfairness}\n"
+            f"Risk Reasons:\n{reasons_str}\n"
+            f"Category: {category}\n"
+            f"Text:\n{text}\n"
+            f"Summary:\n{summary}"
+        )
+
+    def format_chat_context(
+        self,
+        context_clauses: List[Clause],
+        contract_info: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Constructs full system message prompt including Active Contract Context and Canonical Clauses."""
+        filename = contract_info.get("filename", "Active Contract") if contract_info else "Active Contract"
+        fairness = contract_info.get("overall_fairness_score", "N/A") if contract_info else "N/A"
+
+        context_text = "\n\n".join(
+            [self.format_chat_clause(c) for c in context_clauses]
+        ) if context_clauses else "General contract terms."
+
+        return (
+            f"{COPILOT_CHAT_PROMPT}\n\n"
+            f"ACTIVE CONTRACT CONTEXT:\n"
+            f"- Document Filename: {filename}\n"
+            f"- Overall Fairness Score: {fairness}/100\n\n"
+            f"RELEVANT CLAUSES IN CONTEXT:\n{context_text}"
+        )
+
+    # =========================================================================
     # Streaming Chat Copilot (SSE)
     # =========================================================================
     async def stream_chat_response(
@@ -323,33 +378,8 @@ class LLMService:
             session_id = ""
         context_clauses = context_clauses or []
 
-        filename = contract_info.get("filename", "Active Contract") if contract_info else "Active Contract"
-        fairness = contract_info.get("overall_fairness_score", "N/A") if contract_info else "N/A"
-
-        def _format_chat_clause(c: Clause) -> str:
-            reasons = f" | Reasons: {'; '.join(c.risk_reasons)}" if getattr(c, "risk_reasons", None) else ""
-            kind = getattr(c, "clause_kind", "OPERATIVE")
-            risk_bearing = getattr(c, "is_risk_bearing", True)
-            unfairness = getattr(c, "unfairness_score", 30)
-            return (
-                f"[{c.id}] {c.title} (Kind: {kind}, Risk: {c.risk_level}, Unfairness: {unfairness}/100, "
-                f"Risk-Bearing: {risk_bearing}, Category: {c.category}{reasons}):\n"
-                f"{c.text}\nSummary: {c.plain_english_summary}"
-            )
-
-        context_text = "\n\n".join(
-            [_format_chat_clause(c) for c in context_clauses]
-        ) if context_clauses else "General contract terms."
-
         allowed_clause_ids: Set[str] = {c.id for c in context_clauses} if context_clauses else set()
-
-        system_message = (
-            f"{COPILOT_CHAT_PROMPT}\n\n"
-            f"ACTIVE CONTRACT CONTEXT:\n"
-            f"- Document Filename: {filename}\n"
-            f"- Overall Fairness Score: {fairness}/100\n\n"
-            f"RELEVANT CLAUSES IN CONTEXT:\n{context_text}"
-        )
+        system_message = self.format_chat_context(context_clauses, contract_info)
 
         streamed_success = False
         accumulated_raw_text = ""
@@ -579,80 +609,93 @@ class LLMService:
         analyzed_clauses: List[Clause] = []
         if initial_clauses:
             for idx, orig_clause in enumerate(initial_clauses, start=1):
-                # Root cause E: Match strictly on returned clause_id against original clause_id
+                # Match strictly on returned clause_id against original clause_id
                 matched_cd = llm_map.get(orig_clause.id)
 
-                # Root cause D: Deleted positional fallback `if not matched_cd and idx - 1 < len(clauses_data)`.
-                # Never map by array position!
+                # STEP 1: Heuristic structural classifier is the authoritative ground truth for structure
+                heuristic_check = heuristic_engine.evaluate_clause(
+                    orig_clause.title, orig_clause.text, all_clauses=initial_clauses
+                )
+                trusted_clause_kind = heuristic_check.clause_kind
+                trusted_is_risk_bearing = heuristic_check.is_risk_bearing
 
-                if matched_cd:
-                    # Accuracy V2: Read structural classification fields from LLM response
-                    llm_clause_kind = matched_cd.get("clause_kind", "OPERATIVE")
-                    llm_is_risk_bearing = matched_cd.get("is_risk_bearing", True)
-                    llm_risk_reasons = matched_cd.get("risk_reasons", [])
-                    llm_risk_level = matched_cd.get("risk_level", "LOW")
-                    llm_unfairness = int(matched_cd.get("unfairness_score", 20))
-
-                    # Accuracy V2: Post-LLM validation gate — prevent LLM from hallucinating
-                    # HIGH risk on non-risk-bearing clauses (definitions, headings, recitals).
-                    # Use heuristic engine as ground-truth for structural classification.
-                    heuristic_check = heuristic_engine.evaluate_clause(orig_clause.title, orig_clause.text)
-                    if not heuristic_check.is_risk_bearing:
-                        # Heuristic says non-risk-bearing — override LLM if it disagrees
-                        llm_clause_kind = heuristic_check.clause_kind
-                        llm_is_risk_bearing = False
-                        if llm_risk_level == "HIGH":
-                            llm_risk_level = "LOW"
-                            llm_unfairness = min(llm_unfairness, 15)
-                            llm_risk_reasons = []
-                            logger.info(f"Post-LLM gate: overrode HIGH->LOW on non-risk-bearing clause {orig_clause.id} ({heuristic_check.clause_kind})")
-                        elif llm_risk_level == "MEDIUM":
-                            llm_risk_level = "LOW"
-                            llm_unfairness = min(llm_unfairness, 15)
-                            llm_risk_reasons = []
-
-                    analyzed_clauses.append(
-                        Clause(
-                            id=orig_clause.id,
-                            index=orig_clause.index or idx,
-                            title=orig_clause.title,
-                            text=orig_clause.text,
-                            category=matched_cd.get("category", orig_clause.category or "OTHER"),
-                            riskLevel=llm_risk_level,
-                            plainSummary=matched_cd.get("plain_english_summary", ""),
-                            suggestion=matched_cd.get("suggested_pushback"),
-                            unfairnessScore=llm_unfairness,
-                            clauseKind=llm_clause_kind,
-                            isRiskBearing=llm_is_risk_bearing,
-                            riskReasons=llm_risk_reasons if isinstance(llm_risk_reasons, list) else [],
-                            pageNumber=orig_clause.page_number or 1,
-                            startOffset=orig_clause.start_offset,
-                            endOffset=orig_clause.end_offset,
-                        )
+                # STEP 2 & 3: Merge Structural & Risk fields using bidirectional validation
+                if not trusted_is_risk_bearing:
+                    # Structural classifier says NOT risk-bearing:
+                    # Force NEUTRAL, unfairness <= 15, no pushback, no risk reasons
+                    final_risk_level = "NEUTRAL"
+                    raw_unfairness = int(matched_cd.get("unfairness_score", 10)) if matched_cd else 10
+                    final_unfairness = min(raw_unfairness, 15)
+                    final_suggestion = None
+                    final_risk_reasons = []
+                    final_plain_summary = (
+                        matched_cd.get("plain_english_summary", "")
+                        if matched_cd and matched_cd.get("plain_english_summary")
+                        else heuristic_check.plain_summary
+                    )
+                    final_category = (
+                        matched_cd.get("category", orig_clause.category or "OTHER")
+                        if matched_cd
+                        else heuristic_check.category
                     )
                 else:
-                    # Root cause E: If no match exists for a given original clause, use heuristic engine
-                    # for structural classification instead of defaulting to LOW.
-                    heuristic_fb = heuristic_engine.evaluate_clause(orig_clause.title, orig_clause.text)
-                    analyzed_clauses.append(
-                        Clause(
-                            id=orig_clause.id,
-                            index=orig_clause.index or idx,
-                            title=orig_clause.title,
-                            text=orig_clause.text,
-                            category=heuristic_fb.category,
-                            riskLevel=heuristic_fb.risk_level,
-                            plainSummary=heuristic_fb.plain_summary or "Standard commercial legal covenant.",
-                            suggestion=heuristic_fb.suggested_pushback,
-                            unfairnessScore=heuristic_fb.unfairness_score,
-                            clauseKind=heuristic_fb.clause_kind,
-                            isRiskBearing=heuristic_fb.is_risk_bearing,
-                            riskReasons=list(heuristic_fb.risk_reasons),
-                            pageNumber=orig_clause.page_number or 1,
-                            startOffset=orig_clause.start_offset,
-                            endOffset=orig_clause.end_offset,
+                    # Structural classifier says risk-bearing:
+                    if matched_cd:
+                        raw_llm_risk = str(matched_cd.get("risk_level", "LOW")).upper()
+                        raw_llm_unfairness = int(matched_cd.get("unfairness_score", 30))
+                        final_suggestion = matched_cd.get("suggested_pushback")
+                        final_risk_reasons = (
+                            matched_cd.get("risk_reasons", [])
+                            if isinstance(matched_cd.get("risk_reasons"), list)
+                            else []
                         )
+                        final_plain_summary = matched_cd.get("plain_english_summary", "") or heuristic_check.plain_summary
+                        final_category = matched_cd.get("category", orig_clause.category or "OTHER")
+
+                        # Safety rule: HIGH requires triple-gate logic
+                        if raw_llm_risk == "HIGH":
+                            if heuristic_engine.passes_triple_gate(orig_clause.title, orig_clause.text, heuristic_check):
+                                final_risk_level = "HIGH"
+                                final_unfairness = raw_llm_unfairness
+                            else:
+                                logger.info(
+                                    f"Triple-gate safety: LLM assigned HIGH on {orig_clause.id} "
+                                    f"but clause lacks all three gates; downgrading to MEDIUM."
+                                )
+                                final_risk_level = "MEDIUM"
+                                final_unfairness = min(raw_llm_unfairness, 65)
+                        else:
+                            # Preserve LLM result (MEDIUM, LOW, etc.) - do not auto-downgrade to LOW
+                            final_risk_level = raw_llm_risk
+                            final_unfairness = raw_llm_unfairness
+                    else:
+                        # Fallback to heuristic evaluation when no LLM match exists
+                        final_risk_level = heuristic_check.risk_level
+                        final_unfairness = heuristic_check.unfairness_score
+                        final_suggestion = heuristic_check.suggested_pushback
+                        final_risk_reasons = list(heuristic_check.risk_reasons)
+                        final_plain_summary = heuristic_check.plain_summary
+                        final_category = heuristic_check.category
+
+                analyzed_clauses.append(
+                    Clause(
+                        id=orig_clause.id,
+                        index=orig_clause.index or idx,
+                        title=orig_clause.title,
+                        text=orig_clause.text,
+                        category=final_category,
+                        riskLevel=final_risk_level,
+                        plainSummary=final_plain_summary or "Standard commercial legal covenant.",
+                        suggestion=final_suggestion,
+                        unfairnessScore=final_unfairness,
+                        clauseKind=trusted_clause_kind,
+                        isRiskBearing=trusted_is_risk_bearing,
+                        riskReasons=final_risk_reasons,
+                        pageNumber=orig_clause.page_number or 1,
+                        startOffset=orig_clause.start_offset,
+                        endOffset=orig_clause.end_offset,
                     )
+                )
         else:
             for i, cd in enumerate(clauses_data, start=1):
                 cid = cd.get("clause_id") or f"clause_{i}"
@@ -704,7 +747,7 @@ class LLMService:
         evaluated_clauses: List[Clause] = []
 
         for idx, clause in enumerate(initial_clauses, start=1):
-            assessment = heuristic_engine.evaluate_clause(clause.title, clause.text)
+            assessment = heuristic_engine.evaluate_clause(clause.title, clause.text, all_clauses=initial_clauses)
             evaluated_clauses.append(
                 Clause(
                     id=clause.id,
