@@ -282,10 +282,57 @@ class RAGEngine:
 
         all_clauses = session.clauses
 
-        if is_global_risk_query(query):
+        is_global = is_global_risk_query(query)
+        print(f"[DEBUG_GLOBAL_RISK] 1. is_global_risk_query: {is_global} for query: '{query}'", flush=True)
+        print(f"[DEBUG_GLOBAL_RISK] 2. total session clauses: {len(all_clauses)}", flush=True)
+
+        risk_bearing = [c for c in all_clauses if is_risk_bearing_clause(c)]
+        print(f"[DEBUG_GLOBAL_RISK] 3. total risk-bearing clauses: {len(risk_bearing)} (IDs: {[c.id for c in risk_bearing]})", flush=True)
+
+        material_risks = [c for c in all_clauses if is_materially_risky_clause(c)]
+        print(f"[DEBUG_GLOBAL_RISK] 4. total materially-risky clauses: {len(material_risks)}", flush=True)
+
+        mat_info = [(c.id, getattr(c, "risk_level", None), getattr(c, "unfairness_score", None)) for c in material_risks]
+        print(f"[DEBUG_GLOBAL_RISK] 5. materially-risky clauses (ID, risk_level, unfairness_score): {mat_info}", flush=True)
+
+        for c in all_clauses:
+            reasons = []
+            if not is_risk_bearing_clause(c):
+                reasons.append(f"is_risk_bearing_false(is_risk_bearing={getattr(c, 'is_risk_bearing', None)}, kind={getattr(c, 'clause_kind', None)})")
+            r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
+            if r_level in ("LOW", "NEUTRAL"):
+                reasons.append(f"risk_level_{r_level}")
+            unfairness = getattr(c, "unfairness_score", 0) or 0
+            if unfairness < 35:
+                reasons.append(f"unfairness_{unfairness}_lt_35")
+            if r_level == "MEDIUM":
+                text_lower = (getattr(c, "text", "") or "").lower()
+                is_protective = bool(RE_PROTECTIVE_MITIGATION.search(text_lower))
+                has_material_trap = any(
+                    k in text_lower for k in [
+                        "uncapped", "unlimited", "forfeit", "immediately", "without limitation",
+                        "at will", "sole discretion", "sole option", "discretionary audit",
+                        "withhold", "setoff", "non-refundable", "90 days", "without cause",
+                    ]
+                )
+                if is_protective and not has_material_trap:
+                    reasons.append("medium_protective_mitigation")
+                has_exposure_reasons = any(bool(str(r).strip()) for r in (getattr(c, "risk_reasons", []) or []))
+                if not has_exposure_reasons and unfairness < 45:
+                    reasons.append(f"medium_no_exposure_reasons_and_unfairness_{unfairness}_lt_45")
+            if reasons:
+                print(f"[DEBUG_GLOBAL_RISK] Clause {c.id} (kind={getattr(c, 'clause_kind', None)}, risk={r_level}, score={unfairness}) excluded: {', '.join(reasons)}", flush=True)
+
+        logger.info(f"[DEBUG_GLOBAL_RISK] 1. is_global_risk_query: {is_global}")
+        logger.info(f"[DEBUG_GLOBAL_RISK] 2. total session clauses: {len(all_clauses)}")
+        logger.info(f"[DEBUG_GLOBAL_RISK] 3. total risk-bearing clauses: {len(risk_bearing)}")
+        logger.info(f"[DEBUG_GLOBAL_RISK] 4. total materially-risky clauses: {len(material_risks)}")
+        logger.info(f"[DEBUG_GLOBAL_RISK] 5. materially-risky clauses: {mat_info}")
+
+        if is_global:
             # 1. Candidate pool: only genuinely materially risky clauses (HIGH or MEDIUM with substantive imbalance)
-            material_risks = [c for c in all_clauses if is_materially_risky_clause(c)]
             if not material_risks:
+                print(f"[DEBUG_GLOBAL_RISK] material_risks is empty; returning []", flush=True)
                 return []
 
             # 2. Semantic RAG coverage for query, filtering strictly to material risks
@@ -306,7 +353,9 @@ class RAGEngine:
                 return (weight, unfairness, in_rag, reasons_count)
 
             ranked = sorted(material_risks, key=risk_sort_key, reverse=True)
-            return ranked[:k]
+            result = ranked[:k]
+            print(f"[DEBUG_GLOBAL_RISK] ranked material risks (count={len(result)}): {[c.id for c in result]}", flush=True)
+            return result
 
         # Standard RAG behavior for specific clause / scenario inquiries
         context_clauses: List[Clause] = []

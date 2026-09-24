@@ -67,7 +67,31 @@ async def chat_copilot(request: ChatStreamRequest):
                 )
                 raw_clauses.append(clause_obj)
 
-        if is_global_risk_query(query):
+        is_global = is_global_risk_query(query)
+        print(f"[DEBUG_GLOBAL_RISK fallback] 1. is_global_risk_query: {is_global} for query: '{query}'", flush=True)
+        print(f"[DEBUG_GLOBAL_RISK fallback] 2. total contract_context clauses: {len(raw_clauses)}", flush=True)
+        from app.services.rag_engine import is_risk_bearing_clause, is_materially_risky_clause
+        risk_bearing = [c for c in raw_clauses if is_risk_bearing_clause(c)]
+        print(f"[DEBUG_GLOBAL_RISK fallback] 3. total risk-bearing clauses: {len(risk_bearing)} (IDs: {[c.id for c in risk_bearing]})", flush=True)
+        material_risks = [c for c in raw_clauses if is_materially_risky_clause(c)]
+        print(f"[DEBUG_GLOBAL_RISK fallback] 4. total materially-risky clauses: {len(material_risks)}", flush=True)
+        mat_info = [(c.id, getattr(c, "risk_level", None), getattr(c, "unfairness_score", None)) for c in material_risks]
+        print(f"[DEBUG_GLOBAL_RISK fallback] 5. materially-risky clauses (ID, risk_level, unfairness_score): {mat_info}", flush=True)
+
+        for c in raw_clauses:
+            reasons = []
+            if not is_risk_bearing_clause(c):
+                reasons.append(f"is_risk_bearing_false(is_risk_bearing={getattr(c, 'is_risk_bearing', None)}, kind={getattr(c, 'clause_kind', None)})")
+            r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
+            if r_level in ("LOW", "NEUTRAL"):
+                reasons.append(f"risk_level_{r_level}")
+            unfairness = getattr(c, "unfairness_score", 0) or 0
+            if unfairness < 35:
+                reasons.append(f"unfairness_{unfairness}_lt_35")
+            if reasons:
+                print(f"[DEBUG_GLOBAL_RISK fallback] Clause {c.id} (kind={getattr(c, 'clause_kind', None)}, risk={r_level}, score={unfairness}) excluded: {', '.join(reasons)}", flush=True)
+
+        if is_global:
             context_clauses = rank_risk_clauses(raw_clauses, limit=7)
         else:
             if request.selected_clause_id:
@@ -90,6 +114,10 @@ async def chat_copilot(request: ChatStreamRequest):
         "filename": filename,
         "overall_fairness_score": overall_fairness,
     }
+    context_ids = [c.id for c in context_clauses]
+    print(f"[DEBUG_GLOBAL_RISK] 6. final context_clauses IDs passed into stream_chat_response(): {context_ids}", flush=True)
+    logger.info(f"[DEBUG_GLOBAL_RISK] 6. final context_clauses IDs passed into stream_chat_response(): {context_ids}")
+
     event_stream = llm_service.stream_chat_response(
         session_id=session_id,
         query=query,
