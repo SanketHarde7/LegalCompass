@@ -408,6 +408,8 @@ class LLMService:
         # 1. Try Gemini (Primary Engine with Multi-Turn Conversational Memory)
         gemini = self._get_gemini_client()
         if gemini:
+            emitted_visible_text = ""
+            provider_raw_text = ""
             try:
                 logger.info(f"Streaming chat via Gemini: {settings.GEMINI_MODEL_ID}")
                 contents = []
@@ -432,30 +434,43 @@ class LLMService:
                     },
                 )
                 stream_filter = CitationStreamFilter()
-                accumulated_raw_text = ""
                 for chunk in response_stream:
                     if chunk.text:
-                        accumulated_raw_text += chunk.text
+                        provider_raw_text += chunk.text
                         filtered = stream_filter.process_chunk(chunk.text)
                         if filtered:
+                            emitted_visible_text += filtered
                             payload = json.dumps({"type": "token", "content": filtered})
                             yield f"data: {payload}\n\n"
                             await asyncio.sleep(0.01)
 
                 flushed = stream_filter.flush()
                 if flushed:
+                    emitted_visible_text += flushed
                     payload = json.dumps({"type": "token", "content": flushed})
                     yield f"data: {payload}\n\n"
 
-                streamed_success = True
+                if emitted_visible_text.strip():
+                    accumulated_raw_text = provider_raw_text
+                    streamed_success = True
+                else:
+                    logger.warning("Gemini stream finished but produced zero usable visible text. Failing over to Groq...")
+                    accumulated_raw_text = ""
             except Exception as e:
-                logger.warning(f"Gemini streaming failed: {e}. Failing over to Groq...")
-                accumulated_raw_text = ""
+                if emitted_visible_text.strip():
+                    logger.warning(f"Gemini streaming interrupted after partial output: {e}.")
+                    accumulated_raw_text = provider_raw_text
+                    streamed_success = True
+                else:
+                    logger.warning(f"Gemini streaming failed: {e}. Failing over to Groq...")
+                    accumulated_raw_text = ""
 
         # 2. Try Groq (Failover with Conversational Memory)
         if not streamed_success:
             groq = self._get_groq_client()
             if groq:
+                emitted_visible_text = ""
+                provider_raw_text = ""
                 try:
                     logger.info(f"Streaming chat via Groq: {settings.GROQ_MODEL_ID}")
                     messages = [{"role": "system", "content": system_message}]
@@ -471,48 +486,64 @@ class LLMService:
                         model=settings.GROQ_MODEL_ID,
                         messages=messages,
                         temperature=0.2,
-                        max_tokens=350,
+                        max_tokens=1000,
                         stream=True,
                     )
                     stream_filter = CitationStreamFilter()
-                    accumulated_raw_text = ""
                     async for chunk in stream:
                         delta = chunk.choices[0].delta.content or ""
                         if delta:
-                            accumulated_raw_text += delta
+                            provider_raw_text += delta
                             filtered = stream_filter.process_chunk(delta)
                             if filtered:
+                                emitted_visible_text += filtered
                                 payload = json.dumps({"type": "token", "content": filtered})
                                 yield f"data: {payload}\n\n"
                                 await asyncio.sleep(0.01)
 
                     flushed = stream_filter.flush()
                     if flushed:
+                        emitted_visible_text += flushed
                         payload = json.dumps({"type": "token", "content": flushed})
                         yield f"data: {payload}\n\n"
 
-                    streamed_success = True
+                    if emitted_visible_text.strip():
+                        accumulated_raw_text = provider_raw_text
+                        streamed_success = True
+                    else:
+                        logger.warning("Groq stream finished but produced zero usable visible text. Using heuristic streaming fallback...")
+                        accumulated_raw_text = ""
                 except Exception as e:
-                    logger.warning(f"Groq streaming failed: {e}. Using heuristic streaming fallback...")
-                    accumulated_raw_text = ""
+                    if emitted_visible_text.strip():
+                        logger.warning(f"Groq streaming interrupted after partial output: {e}.")
+                        accumulated_raw_text = provider_raw_text
+                        streamed_success = True
+                    else:
+                        logger.warning(f"Groq streaming failed: {e}. Using heuristic streaming fallback...")
+                        accumulated_raw_text = ""
 
         # 3. Fallback Heuristic Generator
         if not streamed_success:
+            logger.info("Executing heuristic streaming fallback...")
             stream_filter = CitationStreamFilter()
-            accumulated_raw_text = ""
+            provider_raw_text = ""
+            emitted_visible_text = ""
             async for token in self._heuristic_stream(query, context_clauses):
-                accumulated_raw_text += token
+                provider_raw_text += token
                 filtered = stream_filter.process_chunk(token)
                 if filtered:
+                    emitted_visible_text += filtered
                     payload = json.dumps({"type": "token", "content": filtered})
                     yield f"data: {payload}\n\n"
                     await asyncio.sleep(0.02)
 
             flushed = stream_filter.flush()
             if flushed:
+                emitted_visible_text += flushed
                 payload = json.dumps({"type": "token", "content": flushed})
                 yield f"data: {payload}\n\n"
 
+            accumulated_raw_text = provider_raw_text
             streamed_success = True
 
         # 2. Suggestion event, if applicable (canonical implementation for all paths)
