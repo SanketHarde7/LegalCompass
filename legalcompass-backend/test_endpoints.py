@@ -9,6 +9,10 @@ Tests all endpoints:
 """
 import sys
 import io
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from fastapi.testclient import TestClient
 from app.main import app
 

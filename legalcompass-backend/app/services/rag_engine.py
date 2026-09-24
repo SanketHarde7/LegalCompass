@@ -63,6 +63,23 @@ def is_global_risk_query(query: str) -> bool:
     return any(p.search(q) for p in GLOBAL_RISK_PATTERNS)
 
 
+# Protective / mitigating language patterns: clauses containing these protections without unilateral traps
+# should never be ranked as material risks merely because of their section/category.
+RE_PROTECTIVE_MITIGATION = re.compile(
+    r"\b(?:"
+    r"client\s+shall\s+(?:defend|indemnify|hold\s+harmless)\s+contractor|"
+    r"contractor\s+(?:shall\s+not\s+be\s+liable|has\s+no\s+liability|shall\s+have\s+no\s+(?:duty|obligation)\s+to\s+indemnify)|"
+    r"except\s+(?:to\s+the\s+extent\s+caused\s+by|for)\s+(?:client|counterparty)|"
+    r"solely\s+to\s+the\s+extent\s+(?:caused\s+by|arising\s+from)\s+contractor's\s+(?:gross\s+negligence|willful)|"
+    r"(?:total|aggregate)\s+liability\s+(?:of\s+contractor\s+)?shall\s+(?:be\s+limited|not\s+exceed|be\s+capped)\s+to\s+(?:fees|amounts)|"
+    r"capped\s+at\s+(?:total\s+fees|fees\s+received|amounts\s+paid)|"
+    r"conditioned\s+upon\s+(?:full\s+)?payment|"
+    r"subject\s+to\s+prior\s+written\s+notice\s+and\s+(?:opportunity|right)\s+to\s+cure"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 def is_risk_bearing_clause(c: Clause) -> bool:
     """Returns True if the clause can carry material legal/operational risk.
     Strictly excludes definitions, headings, recitals, and boilerplate.
@@ -76,12 +93,58 @@ def is_risk_bearing_clause(c: Clause) -> bool:
     return True
 
 
-def rank_risk_clauses(clauses: List[Clause], limit: int = 7) -> List[Clause]:
-    """Filters for genuine risk-bearing clauses and sorts by canonical severity and unfairness.
-    HIGH > MEDIUM > LOW > NEUTRAL. Secondary sort by unfairness_score descending.
-    Never includes definitions, headings, recitals, or non-risk-bearing boilerplate.
+def is_materially_risky_clause(c: Clause) -> bool:
+    """Returns True if the clause represents a genuine material risk (HIGH, or MEDIUM with substantive imbalance).
+    Requirements:
+    1. Must be risk-bearing (strictly excludes DEFINITION, HEADING, RECITAL, BOILERPLATE).
+    2. Excludes LOW and NEUTRAL clauses unconditionally (never used as fillers to reach 5).
+    3. Excludes clauses containing mitigating/protective language (caps, mutuality, client-fault carve-outs,
+       notice protections, payment protections) without substantive unilateral traps.
+    4. Evaluates canonical fields (risk_level, unfairness_score, risk_reasons) and substantive text.
     """
-    risk_bearing = [c for c in clauses if is_risk_bearing_clause(c)]
+    if not is_risk_bearing_clause(c):
+        return False
+
+    r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
+    # LOW or NEUTRAL clauses are NEVER materially risky provisions
+    if r_level in ("LOW", "NEUTRAL"):
+        return False
+
+    unfairness = getattr(c, "unfairness_score", 0) or 0
+    if unfairness < 35:
+        return False
+
+    text = getattr(c, "text", "") or ""
+    text_lower = text.lower()
+    reasons = getattr(c, "risk_reasons", []) or []
+
+    # If MEDIUM: check whether it's actually protective or predominantly mitigated
+    if r_level == "MEDIUM":
+        is_protective = bool(RE_PROTECTIVE_MITIGATION.search(text_lower))
+        has_material_trap = any(
+            k in text_lower for k in [
+                "uncapped", "unlimited", "forfeit", "immediately", "without limitation",
+                "at will", "sole discretion", "sole option", "discretionary audit",
+                "withhold", "setoff", "non-refundable", "90 days", "without cause",
+            ]
+        )
+        if is_protective and not has_material_trap:
+            return False
+
+        has_exposure_reasons = any(bool(str(r).strip()) for r in reasons)
+        if not has_exposure_reasons and unfairness < 45:
+            return False
+
+    return True
+
+
+def rank_risk_clauses(clauses: List[Clause], limit: int = 7) -> List[Clause]:
+    """Filters strictly for genuine materially risky clauses (HIGH, or MEDIUM with substantive imbalance)
+    and sorts by canonical severity and unfairness.
+    Never includes definitions, headings, recitals, non-risk-bearing boilerplate, or LOW/NEUTRAL clauses.
+    Never pads or fills slots with LOW/NEUTRAL clauses just to reach the requested limit.
+    """
+    material_risks = [c for c in clauses if is_materially_risky_clause(c)]
 
     def sort_key(c: Clause):
         r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
@@ -90,7 +153,7 @@ def rank_risk_clauses(clauses: List[Clause], limit: int = 7) -> List[Clause]:
         reasons_count = len(getattr(c, "risk_reasons", []) or [])
         return (weight, unfairness, reasons_count)
 
-    ranked = sorted(risk_bearing, key=sort_key, reverse=True)
+    ranked = sorted(material_risks, key=sort_key, reverse=True)
     return ranked[:limit]
 
 
@@ -220,17 +283,17 @@ class RAGEngine:
         all_clauses = session.clauses
 
         if is_global_risk_query(query):
-            # 1. Candidate pool: all genuine risk-bearing clauses from active session
-            risk_bearing = [c for c in all_clauses if is_risk_bearing_clause(c)]
-            if not risk_bearing:
+            # 1. Candidate pool: only genuinely materially risky clauses (HIGH or MEDIUM with substantive imbalance)
+            material_risks = [c for c in all_clauses if is_materially_risky_clause(c)]
+            if not material_risks:
                 return []
 
-            # 2. Semantic RAG coverage for query
+            # 2. Semantic RAG coverage for query, filtering strictly to material risks
             top_rag = self.retrieve_top_k(session_id, query, k=max(k, 5))
-            rag_ids = {c.id for c in top_rag if is_risk_bearing_clause(c)}
+            rag_ids = {c.id for c in top_rag if is_materially_risky_clause(c)}
 
-            # 3. Rank risk-bearing clauses:
-            # Primary: risk_level (HIGH: 3 > MEDIUM: 2 > LOW: 1 > NEUTRAL: 0)
+            # 3. Rank materially risky clauses:
+            # Primary: risk_level (HIGH: 3 > MEDIUM: 2)
             # Secondary: unfairness_score descending
             # Tertiary: semantic RAG match boost
             # Quaternary: risk_reasons count
@@ -242,7 +305,7 @@ class RAGEngine:
                 reasons_count = len(getattr(c, "risk_reasons", []) or [])
                 return (weight, unfairness, in_rag, reasons_count)
 
-            ranked = sorted(risk_bearing, key=risk_sort_key, reverse=True)
+            ranked = sorted(material_risks, key=risk_sort_key, reverse=True)
             return ranked[:k]
 
         # Standard RAG behavior for specific clause / scenario inquiries

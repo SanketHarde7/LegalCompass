@@ -668,16 +668,17 @@ def test_17_global_risk_ranking_prefers_high_medium_over_low():
     assert ranked[3].id == "c_med_2", f"Expected c_med_2 fourth, got {ranked[3].id}"
     assert ranked[3].risk_level == "MEDIUM"
 
-    # 4. 5th clause is the higher unfairness LOW clause
-    assert ranked[4].id == "c_low_2", f"Expected c_low_2 fifth, got {ranked[4].id}"
-    assert ranked[4].risk_level == "LOW"
+    # 4. Only genuine materially risky clauses are returned (exactly 4, not padded with LOW to reach 5)
+    assert len(ranked) == 4, f"Expected 4 materially risky clauses, got {len(ranked)}"
+    assert "c_low_1" not in [c.id for c in ranked], "LOW clause must not be in ranked list"
+    assert "c_low_2" not in [c.id for c in ranked], "LOW clause must not be in ranked list"
 
-    # 5. Verify LOW clauses never precede HIGH or MEDIUM
+    # 5. Verify monotonic risk severity ranking (HIGH before MEDIUM)
     risk_weights = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NEUTRAL": 0}
     weights = [risk_weights[c.risk_level] for c in ranked]
     assert weights == sorted(weights, reverse=True), "Ranked list must be monotonically non-increasing by risk severity"
 
-    print("  ✓ Test 17: Global risk ranking strictly prefers HIGH/MEDIUM over LOW/NEUTRAL")
+    print("  ✓ Test 17: Global risk ranking strictly prefers HIGH/MEDIUM and never pads with LOW/NEUTRAL")
 
 
 def test_18_global_risk_excludes_definitions_even_if_selected():
@@ -747,9 +748,157 @@ def test_20_cannot_return_low_when_high_exists():
     print("  ✓ Test 20: Verified global top risks query CANNOT return LOW/NEUTRAL when stronger risk clauses exist")
 
 
+def test_21_low_protective_clause_excluded_from_global_risk():
+    """TEST 21 — LOW protective clause in an indemnity/liability section must NEVER be ranked as a material risk."""
+    clauses = [
+        Clause(
+            id="c_prot_indem",
+            title="3.2 Client Indemnification of Contractor",
+            text="Client shall defend, indemnify, and hold harmless Contractor from and against any and all third-party claims, damages, and expenses arising out of Client's breach or materials.",
+            risk_level="LOW",
+            clause_kind="OPERATIVE",
+            is_risk_bearing=True,
+            unfairness_score=15,
+            risk_reasons=[],
+        ),
+        Clause(
+            id="c_high_ip",
+            title="4.1 Immediate IP Assignment",
+            text="Contractor hereby irrevocably assigns all intellectual property rights to Client immediately upon creation without condition of payment.",
+            risk_level="HIGH",
+            clause_kind="OPERATIVE",
+            is_risk_bearing=True,
+            unfairness_score=90,
+            risk_reasons=["Material consequence: unconditional IP forfeiture", "Meaningful imbalance: unilateral transfer without payment"],
+        ),
+    ]
+
+    session_id = "test_sess_protective_exclude"
+    rag_engine.index_document(session_id, "ProtectiveTest.pdf", clauses)
+
+    query = "What are the 5 most materially risky operative provisions in this contract?"
+    ranked = rank_risk_clauses(clauses, limit=5)
+    context = rag_engine.retrieve_chat_context(session_id, query, k=5)
+
+    ranked_ids = [c.id for c in ranked]
+    context_ids = [c.id for c in context]
+
+    assert "c_prot_indem" not in ranked_ids, "LOW protective clause must be excluded from rank_risk_clauses"
+    assert "c_prot_indem" not in context_ids, "LOW protective clause must be excluded from retrieve_chat_context"
+    assert ranked_ids == ["c_high_ip"]
+    assert context_ids == ["c_high_ip"]
+    print("  ✓ Test 21: LOW protective clause under indemnity section strictly excluded from global risk ranking")
+
+
+def test_22_mitigation_clause_excluded_from_material_risk():
+    """TEST 22 — Clause containing mitigating/protective language (caps, mutuality, carve-outs) excluded from material risk."""
+    clauses = [
+        Clause(
+            id="c_mitigated_indem",
+            title="4.1 Mutual Indemnification and Liability Cap",
+            text="Each party shall defend and indemnify the other against third-party claims arising solely from its gross negligence. Contractor's total aggregate liability shall be capped at fees received. Contractor shall have no liability for claims arising from Client's negligence.",
+            risk_level="MEDIUM",
+            clause_kind="OPERATIVE",
+            is_risk_bearing=True,
+            unfairness_score=35,
+            risk_reasons=["Bilateral indemnity with contractual fee cap"],
+        ),
+        Clause(
+            id="c_high_trap",
+            title="5.1 Uncapped Direct Damages",
+            text="Contractor shall be liable for all direct, indirect, and consequential damages without limitation or cap.",
+            risk_level="HIGH",
+            clause_kind="OPERATIVE",
+            is_risk_bearing=True,
+            unfairness_score=95,
+            risk_reasons=["Material consequence: unlimited liability", "Meaningful imbalance: uncapped damages against contractor"],
+        ),
+    ]
+
+    session_id = "test_sess_mitigation_exclude"
+    rag_engine.index_document(session_id, "MitigationTest.pdf", clauses)
+
+    query = "What are the highest risk provisions?"
+    context = rag_engine.retrieve_chat_context(session_id, query, k=5)
+    context_ids = [c.id for c in context]
+
+    assert "c_mitigated_indem" not in context_ids, "Mitigated clause with fee caps and carve-outs must not be ranked as material risk"
+    assert context_ids == ["c_high_trap"]
+    print("  ✓ Test 22: Mitigated clause with caps, mutuality, and carve-outs excluded from material risk ranking")
+
+
+def test_23_low_neutral_clauses_never_used_as_fillers():
+    """TEST 23 — Proves that for a 'top 5' query, fewer than 5 items are returned when fewer than 5 material risks exist."""
+    clauses = [
+        Clause(id="def_1", title="1.1 Definitions — Scope", text="Definitions text.", risk_level="NEUTRAL", clause_kind="DEFINITION", is_risk_bearing=False, unfairness_score=0),
+        Clause(id="c_low_1", title="2.1 Term Duration", text="Agreement continues for 1 year.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=10),
+        Clause(id="c_low_2", title="2.2 Confidentiality", text="Parties maintain mutual confidentiality.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=15),
+        Clause(id="c_low_3", title="2.3 Notices", text="Notices given in writing.", risk_level="LOW", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=10),
+        Clause(id="c_med_renewal", title="3.1 Auto-Renewal Trap", text="Automatically renews unless non-renewal notice provided 90 days prior.", risk_level="MEDIUM", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=60, risk_reasons=["Excessive 90-day non-renewal notice"]),
+        Clause(id="c_high_indem", title="4.1 Uncapped Indemnity", text="Contractor indemnifies client without cap or fault.", risk_level="HIGH", clause_kind="OPERATIVE", is_risk_bearing=True, unfairness_score=95, risk_reasons=["Uncapped unilateral indemnification"]),
+    ]
+
+    session_id = "test_sess_filler_proof"
+    rag_engine.index_document(session_id, "FewRisksContract.pdf", clauses)
+
+    query = "What are the 5 most materially risky operative provisions in this contract?"
+    ranked = rank_risk_clauses(clauses, limit=5)
+    context = rag_engine.retrieve_chat_context(session_id, query, k=5)
+
+    # Exactly 2 clauses exist that are materially risky (c_high_indem and c_med_renewal).
+    # Remaining 3 slots must NOT be filled with LOW/NEUTRAL clauses!
+    assert len(ranked) == 2, f"Expected exactly 2 material risks in rank_risk_clauses, got {len(ranked)}"
+    assert len(context) == 2, f"Expected exactly 2 material risks in retrieve_chat_context, got {len(context)}"
+    assert [c.id for c in ranked] == ["c_high_indem", "c_med_renewal"]
+    assert [c.id for c in context] == ["c_high_indem", "c_med_renewal"]
+    for low_id in ["def_1", "c_low_1", "c_low_2", "c_low_3"]:
+        assert low_id not in [c.id for c in context], f"{low_id} was improperly used as a filler!"
+    print("  ✓ Test 23: LOW/NEUTRAL clauses are never used as fillers to reach 'top 5'")
+
+
+def test_24_proposed_rewrites_tailored_to_clause_text_and_reasons():
+    """TEST 24 — Proposed rewrites are generated from actual clause text and risk reasons, not broad category name alone."""
+    from app.services.llm_service import llm_service
+
+    ip_clause = Clause(
+        id="c_ip",
+        title="4.1 Intellectual Property Assignment",
+        text="Contractor hereby irrevocably assigns all intellectual property rights to Client immediately upon creation without condition of payment.",
+        category="INTELLECTUAL_PROPERTY",
+        risk_level="HIGH",
+        clause_kind="OPERATIVE",
+        is_risk_bearing=True,
+        unfairness_score=90,
+        risk_reasons=["Material consequence: immediate unconditional assignment", "Meaningful imbalance: transfer occurs prior to payment"],
+    )
+
+    pay_clause = Clause(
+        id="c_pay",
+        title="5.1 Disputed Invoicing & Withholding",
+        text="Client reserves the right to withhold any invoice payments or setoff disputed fees at its sole discretion.",
+        category="PAYMENT_TERMS",
+        risk_level="MEDIUM",
+        clause_kind="OPERATIVE",
+        is_risk_bearing=True,
+        unfairness_score=65,
+        risk_reasons=["Meaningful imbalance: unilateral right to withhold invoice payments"],
+    )
+
+    ip_rewrite = llm_service._generate_tailored_counter_proposal(ip_clause)
+    pay_rewrite = llm_service._generate_tailored_counter_proposal(pay_clause)
+
+    # IP rewrite must target IP transfer and payment condition, NOT generic liability caps
+    assert "intellectual property" in ip_rewrite.lower() or "payment" in ip_rewrite.lower(), f"IP rewrite not tailored: {ip_rewrite}"
+    assert "liability cap" not in ip_rewrite.lower(), f"IP rewrite used generic liability boilerplate: {ip_rewrite}"
+
+    # Payment rewrite must target invoice / withholding, NOT IP or liability caps
+    assert "invoice" in pay_rewrite.lower() or "payment" in pay_rewrite.lower() or "withhold" in pay_rewrite.lower(), f"Payment rewrite not tailored: {pay_rewrite}"
+    print("  ✓ Test 24: Proposed rewrites are tailored to actual clause text and risk reasons, not category name alone")
+
+
 def main():
     print("================================================================")
-    print("ACCURACY V2.3 — GENERALIZED REGRESSION TEST SUITE")
+    print("ACCURACY V2.4 — GENERALIZED REGRESSION TEST SUITE")
     print("(Zero Hardcoding — All Synthetic Inline Text)")
     print("================================================================\n")
 
@@ -827,13 +976,17 @@ def main():
             print(f"  ✗ Test {label}: ERROR — {e}")
             failed += 1
 
-    print("\n--- Accuracy V2.3 Global Risk Ranking Tests (16 - 20) ---")
+    print("\n--- Accuracy V2.3 & V2.4 Global Risk Ranking & Quality Tests (16 - 24) ---")
     tests_v2_3 = [
         ("16", test_16_global_risk_query_intent_detection),
         ("17", test_17_global_risk_ranking_prefers_high_medium_over_low),
         ("18", test_18_global_risk_excludes_definitions_even_if_selected),
         ("19", test_19_normal_rag_preserved_for_specific_queries),
         ("20", test_20_cannot_return_low_when_high_exists),
+        ("21", test_21_low_protective_clause_excluded_from_global_risk),
+        ("22", test_22_mitigation_clause_excluded_from_material_risk),
+        ("23", test_23_low_neutral_clauses_never_used_as_fillers),
+        ("24", test_24_proposed_rewrites_tailored_to_clause_text_and_reasons),
     ]
 
     for label, fn in tests_v2_3:

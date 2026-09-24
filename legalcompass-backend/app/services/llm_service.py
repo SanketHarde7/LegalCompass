@@ -339,6 +339,9 @@ class LLMService:
         else:
             reasons_str = "- None (Standard or balanced provision)"
 
+        pushback = getattr(c, "suggested_pushback", None) or getattr(c, "suggestion", None)
+        pushback_str = f"\nSuggested Pushback: {pushback}" if pushback else ""
+
         return (
             f"[{cid}]\n"
             f"Title: {title}\n"
@@ -350,6 +353,7 @@ class LLMService:
             f"Category: {category}\n"
             f"Text:\n{text}\n"
             f"Summary:\n{summary}"
+            f"{pushback_str}"
         )
 
     def format_chat_context(
@@ -845,33 +849,94 @@ class LLMService:
             documentTitle=document_title,
         )
 
+    def _generate_tailored_counter_proposal(self, clause: Clause) -> str:
+        """Generates a protective replacement clause tailored to the actual clause text and risk reasons.
+        Avoids generic or section-name-only boilerplate rewrites.
+        """
+        # 1. Prefer canonical suggested_pushback if already attached
+        pushback = getattr(clause, "suggested_pushback", None) or getattr(clause, "suggestion", None)
+        if pushback and len(str(pushback).strip()) > 10:
+            return str(pushback).strip()
+
+        text_lower = (getattr(clause, "text", "") or "").lower()
+        title_lower = (getattr(clause, "title", "") or "").lower()
+        reasons = " ".join(getattr(clause, "risk_reasons", []) or []).lower()
+        combined = f"{title_lower} {text_lower} {reasons}"
+
+        # 2. Intellectual Property & Work Product
+        if any(k in combined for k in ["intellectual property", "inventions", "work made for hire", "deliverables", "assigns all", "assign all"]):
+            return "All intellectual property rights in and to Deliverables shall transfer exclusively to Client strictly upon Contractor's receipt of full and complete invoice payment."
+
+        # 3. Order of Precedence & Invoicing Carve-Outs
+        if any(k in combined for k in ["order of precedence", "purchase order", "invoice shall control", "override"]):
+            return "The terms and conditions of this Agreement shall strictly prevail and control over any conflict with any Purchase Order or invoice."
+
+        # 4. Indemnification & Defense Costs
+        if any(k in combined for k in ["indemn", "hold harmless", "defense costs", "attorney fees"]):
+            return "Each party shall mutually indemnify the other against third-party claims arising solely from its gross negligence. Total liability under this indemnity shall be capped at fees received under this Agreement."
+
+        # 5. Termination & Forfeiture
+        if any(k in combined for k in ["terminat", "cancel", "forfeit"]):
+            return "Either party may terminate for convenience upon thirty (30) days prior written notice. Upon termination, Client shall pay Contractor for all completed work and non-cancelable commitments."
+
+        # 6. Renewal & Term Extensions
+        if any(k in combined for k in ["renew", "auto-renew", "extension", "lock-in"]):
+            return "Any extension or renewal of the term shall require the mutual written agreement of both parties executed prior to term expiration."
+
+        # 7. Payment Terms, Setoff & Withholding
+        if any(k in combined for k in ["payment", "invoice", "withhold", "setoff", "net 90", "net 60"]):
+            return "Invoices shall be payable within thirty (30) days of receipt. Undisputed invoice portions shall be disbursed immediately, and disputed items resolved in good faith."
+
+        # 8. Inspection / Audit / Tenancy Entry
+        if any(k in combined for k in ["audit", "inspection", "enter premises", "deposit"]):
+            return "Audits or premise inspections may occur only during normal business hours with at least seven (7) business days advance written notice."
+
+        # Default fallback
+        return "Obligations shall be mutual, reasonable, and capped at total fees paid under this Agreement, with neither party exercising unilateral discretion."
+
     async def _heuristic_stream(self, query: str, context: List[Clause]) -> AsyncGenerator[str, None]:
         """Simulates realistic conversational streaming chunks based on context."""
-        from app.services.rag_engine import is_global_risk_query
+        from app.services.rag_engine import is_global_risk_query, is_materially_risky_clause
 
         if is_global_risk_query(query) and context:
-            top_clauses = context[:5]
-            lines = [
-                "Based on the canonical analysis of your agreement, the most materially risky operative provisions are:\n"
-            ]
-            for idx, c in enumerate(top_clauses, 1):
-                cite = f" [CITE:{c.id}]"
-                summary = c.plain_english_summary or f"Assessed as {c.risk_level} risk with material imbalance."
-                lines.append(f"{idx}. **{c.title}** ({c.risk_level} Risk): {summary}{cite}")
+            # Filter strictly to materially risky clauses (HIGH or genuine MEDIUM)
+            material_clauses = [c for c in context if is_materially_risky_clause(c)]
+            if not material_clauses:
+                response_text = (
+                    "Based on the canonical analysis of your agreement, no material legal risks or predatory operative provisions were detected. "
+                    "The reviewed terms appear standard, balanced, or protective for your position.\n\n"
+                    "*(LegalCompass provides educational risk analysis, not formal legal counsel.)*"
+                )
+            else:
+                count = len(material_clauses)
+                count_str = f"the {count}" if count > 1 else "the"
+                lines = [
+                    f"Based on the canonical analysis of your agreement, {count_str} materially risky operative provision{'s are' if count > 1 else ' is'}:\n"
+                ]
+                for idx, c in enumerate(material_clauses, 1):
+                    cite = f" [CITE:{c.id}]"
+                    summary = c.plain_english_summary or getattr(c, "plainSummary", "") or f"Assessed as {c.risk_level} risk with material imbalance."
+                    lines.append(f"{idx}. **{c.title}** ({c.risk_level} Risk): {summary}{cite}")
 
-            top_c = top_clauses[0]
-            counter = top_c.suggested_pushback or "Propose mutual liability caps and remove unilateral discretion."
-            lines.append(f"\n**Protective Counter-Proposal:** {counter}")
-            response_text = "\n".join(lines)
+                top_c = material_clauses[0]
+                counter = self._generate_tailored_counter_proposal(top_c)
+                lines.append(f"\n**Protective Counter-Proposal ({top_c.title}):** {counter}")
+                if count < 5 and any(num in query.lower() for num in ["5", "five", "top 5", "top five"]):
+                    lines.append(f"\n*(Note: Only {count} materially risky operative provision{'s exist' if count > 1 else ' exists'} in this agreement; remaining terms are balanced, standard, or protective.)*")
+                lines.append("\n*(LegalCompass provides educational risk analysis, not formal legal counsel.)*")
+                response_text = "\n".join(lines)
         else:
             matched_clause = context[0] if context else None
             cite_marker = f" [CITE:{matched_clause.id}]" if matched_clause else ""
+            summary = (matched_clause.plain_english_summary or getattr(matched_clause, "plainSummary", "")) if matched_clause else "Review the highlighted terms for liability caps."
+            counter = self._generate_tailored_counter_proposal(matched_clause) if matched_clause else "Propose balanced mutual terms to cap total financial liability and guarantee payment for completed milestones."
             response_text = (
                 f"Based on your contract terms, particularly **{matched_clause.title if matched_clause else 'the agreement'}**, "
                 "here is an analysis of your operational and legal risk:\n\n"
-                f"1. **Core Exposure:** {matched_clause.plain_english_summary if matched_clause else 'Review the highlighted terms for liability caps.'}{cite_marker}\n"
+                f"1. **Core Exposure:** {summary}{cite_marker}\n"
                 "2. **Legal Leverage:** The drafting party holds significant unilateral leverage under the current draft.\n\n"
-                "**Recommendation:** Propose balanced mutual terms to cap total financial liability and guarantee payment for completed milestones."
+                f"**Recommendation:** {counter}\n\n"
+                "*(LegalCompass provides educational risk analysis, not formal legal counsel.)*"
             )
         words = response_text.split(" ")
         for word in words:
