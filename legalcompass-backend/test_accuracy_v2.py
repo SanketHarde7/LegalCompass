@@ -896,6 +896,185 @@ def test_24_proposed_rewrites_tailored_to_clause_text_and_reasons():
     print("  ✓ Test 24: Proposed rewrites are tailored to actual clause text and risk reasons, not category name alone")
 
 
+def test_25_rag_session_missing_contract_context_fallback_reproduces_canonical_ranking():
+    """TEST 25 — When RAG session is unavailable, contract_context fallback reconstructs
+    canonical metadata, ranks genuine HIGH/MEDIUM clauses, excludes definitions/LOW clauses,
+    emits valid SSE events, and avoids generic empty-risk fallback.
+    """
+    import json
+    import time
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    missing_session_id = f"test_missing_sess_{int(time.time() * 1000)}"
+
+    # Ensure RAG session does NOT exist
+    assert rag_engine.get_session(missing_session_id) is None
+
+    contract_context_payload = {
+        "filename": "FallbackArchitectureContract.pdf",
+        "overallFairnessScore": 62,
+        "totalPages": 2,
+        "clauseIndex": [
+            {"id": "c_def_1", "title": "1.1 Definitions — Services", "riskLevel": "NEUTRAL", "pageNumber": 1},
+            {"id": "c_def_2", "title": "1.2 Definitions — Deliverables", "riskLevel": "NEUTRAL", "pageNumber": 1},
+            {"id": "c_low_1", "title": "2.1 Scope of Work", "riskLevel": "LOW", "pageNumber": 1},
+            {"id": "c_low_2", "title": "2.2 Standard Notices", "riskLevel": "LOW", "pageNumber": 1},
+            {"id": "c_high_indem", "title": "3.1 Uncapped Indemnification", "riskLevel": "HIGH", "pageNumber": 2},
+            {"id": "c_med_setoff", "title": "4.1 Payment Withholding & Discretionary Setoff", "riskLevel": "MEDIUM", "pageNumber": 2},
+            {"id": "c_med_renew", "title": "5.1 Automatic Lock-in Renewal", "riskLevel": "MEDIUM", "pageNumber": 2},
+        ],
+        "clauses": [
+            {
+                "id": "c_def_1",
+                "title": "1.1 Definitions — Services",
+                "text": "Services means professional architecture consulting provided hereunder.",
+                "riskLevel": "NEUTRAL",
+                "unfairnessScore": 10,
+                "clauseKind": "DEFINITION",
+                "isRiskBearing": False,
+                "riskReasons": [],
+                "category": "OTHER",
+                "plainSummary": "Standard definition of services.",
+                "pageNumber": 1,
+            },
+            {
+                "id": "c_def_2",
+                "title": "1.2 Definitions — Deliverables",
+                "text": "Deliverables means all documents and work products created under an SOW.",
+                "riskLevel": "NEUTRAL",
+                "unfairnessScore": 10,
+                "clauseKind": "DEFINITION",
+                "isRiskBearing": False,
+                "riskReasons": [],
+                "category": "OTHER",
+                "plainSummary": "Standard definition of deliverables.",
+                "pageNumber": 1,
+            },
+            {
+                "id": "c_low_1",
+                "title": "2.1 Scope of Work",
+                "text": "Contractor shall provide services in accordance with mutually agreed Statements of Work.",
+                "riskLevel": "LOW",
+                "unfairnessScore": 20,
+                "clauseKind": "OPERATIVE",
+                "isRiskBearing": True,
+                "riskReasons": [],
+                "category": "OTHER",
+                "plainSummary": "Mutual agreement required for work.",
+                "pageNumber": 1,
+            },
+            {
+                "id": "c_low_2",
+                "title": "2.2 Standard Notices",
+                "text": "All notices under this Agreement shall be given in writing via registered email.",
+                "riskLevel": "LOW",
+                "unfairnessScore": 15,
+                "clauseKind": "OPERATIVE",
+                "isRiskBearing": True,
+                "riskReasons": [],
+                "category": "OTHER",
+                "plainSummary": "Standard written notice procedure.",
+                "pageNumber": 1,
+            },
+            {
+                "id": "c_high_indem",
+                "title": "3.1 Uncapped Indemnification",
+                "text": "Contractor agrees to defend, indemnify, and hold harmless Client against any and all claims, liabilities, and damages arising out of performance, without limitation or monetary cap.",
+                "riskLevel": "HIGH",
+                "unfairnessScore": 95,
+                "clauseKind": "OPERATIVE",
+                "isRiskBearing": True,
+                "riskReasons": ["Uncapped unilateral indemnity obligation", "Absence of fault requirement or mutual liability cap"],
+                "category": "INDEMNIFICATION",
+                "plainSummary": "You are exposed to unlimited legal liabilities and expenses without any cap.",
+                "suggestion": "Cap indemnification to total fees paid under this Agreement and make obligations mutual.",
+                "pageNumber": 2,
+            },
+            {
+                "id": "c_med_setoff",
+                "title": "4.1 Payment Withholding & Discretionary Setoff",
+                "text": "Client reserves the unilateral right to withhold invoiced amounts and setoff any disputed amounts at its sole discretion.",
+                "riskLevel": "MEDIUM",
+                "unfairnessScore": 65,
+                "clauseKind": "OPERATIVE",
+                "isRiskBearing": True,
+                "riskReasons": ["Unilateral payment withholding without objective verification", "Discretionary setoff power"],
+                "category": "PAYMENT_TERMS",
+                "plainSummary": "Client can withhold money without objective proof.",
+                "suggestion": "Require Net-30 payment and limit withholding strictly to bona fide itemized disputed fees.",
+                "pageNumber": 2,
+            },
+            {
+                "id": "c_med_renew",
+                "title": "5.1 Automatic Lock-in Renewal",
+                "text": "Agreement automatically renews for successive 1-year terms unless Contractor provides notice at least 90 days prior.",
+                "riskLevel": "MEDIUM",
+                "unfairnessScore": 60,
+                "clauseKind": "OPERATIVE",
+                "isRiskBearing": True,
+                "riskReasons": ["Excessive 90-day advance notice requirement", "Automatic contract lock-in"],
+                "category": "TERMINATION",
+                "plainSummary": "90-day window to opt out of auto-renewal.",
+                "suggestion": "Change renewal notice to 30 days.",
+                "pageNumber": 2,
+            },
+        ],
+    }
+
+    req_body = {
+        "sessionId": missing_session_id,
+        "message": "What are the 5 most materially risky operative provisions in this contract?",
+        "contractContext": contract_context_payload,
+    }
+
+    with client.stream("POST", "/api/chat", json=req_body) as res:
+        assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.text}"
+        assert "text/event-stream" in res.headers.get("content-type", "")
+
+        events = []
+        token_text = ""
+        cited_ids = set()
+
+        for raw_line in res.iter_lines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload_str = line[5:].strip()
+            try:
+                chunk = json.loads(payload_str)
+                events.append(chunk)
+                if chunk.get("type") == "token":
+                    token_text += chunk.get("content", "")
+                elif chunk.get("type") == "citation":
+                    for cid in chunk.get("clause_ids", []):
+                        cited_ids.add(cid)
+            except Exception:
+                pass
+
+        # 1. Verify SSE events received
+        assert len(events) > 0, "No SSE events received"
+        assert any(e.get("type") == "done" for e in events), "Missing 'done' SSE event"
+
+        # 2. Materially risky provisions MUST be identified
+        assert "c_high_indem" in token_text or "3.1" in token_text or "c_high_indem" in cited_ids, "HIGH risk clause was not cited/analyzed!"
+        assert "c_med_setoff" in token_text or "4.1" in token_text or "setoff" in token_text.lower() or "withhold" in token_text.lower() or "c_med_setoff" in cited_ids, "MEDIUM setoff clause was not cited/analyzed!"
+        assert "c_med_renew" in token_text or "5.1" in token_text or "renew" in token_text.lower() or "c_med_renew" in cited_ids, "MEDIUM renewal clause was not cited/analyzed!"
+
+        # 3. Definitions and LOW clauses MUST be excluded
+        assert "c_def_1" not in cited_ids, "Definition 1.1 was erroneously cited!"
+        assert "c_def_2" not in cited_ids, "Definition 1.2 was erroneously cited!"
+        assert "c_low_1" not in cited_ids, "LOW clause 2.1 was erroneously cited!"
+        assert "c_low_2" not in cited_ids, "LOW clause 2.2 was erroneously cited!"
+
+        # 4. No generic "no material legal risks detected" text
+        assert "no material legal risks or predatory operative provisions were detected" not in token_text, \
+            "Empty-context fallback was incorrectly emitted despite valid material risks in contractContext!"
+
+    print("  ✓ Test 25: Missing RAG session correctly falls back to contractContext, reproduces canonical ranking, and excludes non-risk definitions")
+
+
 def main():
     print("================================================================")
     print("ACCURACY V2.4 — GENERALIZED REGRESSION TEST SUITE")
@@ -987,6 +1166,7 @@ def main():
         ("22", test_22_mitigation_clause_excluded_from_material_risk),
         ("23", test_23_low_neutral_clauses_never_used_as_fillers),
         ("24", test_24_proposed_rewrites_tailored_to_clause_text_and_reasons),
+        ("25", test_25_rag_session_missing_contract_context_fallback_reproduces_canonical_ranking),
     ]
 
     for label, fn in tests_v2_3:

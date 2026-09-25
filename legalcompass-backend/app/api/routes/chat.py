@@ -45,52 +45,62 @@ async def chat_copilot(request: ChatStreamRequest):
         overall_fairness = request.contract_context.overall_fairness_score or overall_fairness
         raw_clauses: List[Clause] = []
         if request.contract_context.clauses:
-            for c_data in request.contract_context.clauses:
-                c_id = c_data.get("id", "")
-                c_title = c_data.get("title", "")
-                c_text = c_data.get("text", "") or c_data.get("originalText", "")
-                c_risk = c_data.get("riskLevel", "LOW")
-                c_summary = c_data.get("plainSummary", "")
-                c_sugg = c_data.get("suggestion", "")
+            for idx, c_data in enumerate(request.contract_context.clauses, start=1):
+                c_id = c_data.get("id") or f"clause_{idx}"
+                c_title = c_data.get("title") or f"Clause {idx}"
+                c_text = c_data.get("text") or c_data.get("originalText") or ""
+                c_risk = c_data.get("riskLevel") or c_data.get("risk_level") or "LOW"
+                c_summary = c_data.get("plainSummary") or c_data.get("plain_english_summary") or ""
+                c_sugg = c_data.get("suggestion") or c_data.get("suggested_pushback") or None
+                c_cat = c_data.get("category") or "OTHER"
+                c_kind = c_data.get("clauseKind") or c_data.get("clause_kind") or "OPERATIVE"
+
+                # Preserve supplied is_risk_bearing exactly, or infer from clause_kind if omitted
+                if "isRiskBearing" in c_data and c_data["isRiskBearing"] is not None:
+                    c_is_rb = bool(c_data["isRiskBearing"])
+                elif "is_risk_bearing" in c_data and c_data["is_risk_bearing"] is not None:
+                    c_is_rb = bool(c_data["is_risk_bearing"])
+                else:
+                    c_is_rb = str(c_kind).upper() not in ("DEFINITION", "HEADING", "RECITAL", "BOILERPLATE")
+
+                # Preserve supplied unfairness_score exactly, without defaulting to 30 when missing
+                if "unfairnessScore" in c_data and c_data["unfairnessScore"] is not None:
+                    c_unfairness = int(c_data["unfairnessScore"])
+                elif "unfairness_score" in c_data and c_data["unfairness_score"] is not None:
+                    c_unfairness = int(c_data["unfairness_score"])
+                else:
+                    # Rational default matching the canonical risk severity, avoiding false-drop of HIGH/MEDIUM
+                    c_unfairness = {"HIGH": 80, "MEDIUM": 60, "LOW": 20, "NEUTRAL": 10}.get(str(c_risk).upper(), 30)
+
+                # Preserve supplied risk_reasons exactly
+                raw_reasons = c_data.get("riskReasons") if "riskReasons" in c_data else c_data.get("risk_reasons")
+                if raw_reasons is None:
+                    c_reasons = []
+                elif isinstance(raw_reasons, list):
+                    c_reasons = [str(r) for r in raw_reasons]
+                else:
+                    c_reasons = [str(raw_reasons)]
+
+                c_page = c_data.get("pageNumber") or c_data.get("page_number") or 1
+
                 clause_obj = Clause(
                     id=c_id,
+                    index=idx,
                     title=c_title,
                     text=c_text,
                     risk_level=c_risk,
                     plain_english_summary=c_summary,
                     suggested_pushback=c_sugg,
-                    category=c_data.get("category", "OTHER"),
-                    clause_kind=c_data.get("clauseKind") or c_data.get("clause_kind", "OPERATIVE"),
-                    is_risk_bearing=c_data.get("isRiskBearing", c_data.get("is_risk_bearing", True)),
-                    risk_reasons=c_data.get("riskReasons") or c_data.get("risk_reasons", []),
-                    unfairness_score=c_data.get("unfairnessScore") or c_data.get("unfairness_score", 30),
+                    category=c_cat,
+                    clause_kind=c_kind,
+                    is_risk_bearing=c_is_rb,
+                    risk_reasons=c_reasons,
+                    unfairness_score=c_unfairness,
+                    page_number=c_page,
                 )
                 raw_clauses.append(clause_obj)
 
         is_global = is_global_risk_query(query)
-        print(f"[DEBUG_GLOBAL_RISK fallback] 1. is_global_risk_query: {is_global} for query: '{query}'", flush=True)
-        print(f"[DEBUG_GLOBAL_RISK fallback] 2. total contract_context clauses: {len(raw_clauses)}", flush=True)
-        from app.services.rag_engine import is_risk_bearing_clause, is_materially_risky_clause
-        risk_bearing = [c for c in raw_clauses if is_risk_bearing_clause(c)]
-        print(f"[DEBUG_GLOBAL_RISK fallback] 3. total risk-bearing clauses: {len(risk_bearing)} (IDs: {[c.id for c in risk_bearing]})", flush=True)
-        material_risks = [c for c in raw_clauses if is_materially_risky_clause(c)]
-        print(f"[DEBUG_GLOBAL_RISK fallback] 4. total materially-risky clauses: {len(material_risks)}", flush=True)
-        mat_info = [(c.id, getattr(c, "risk_level", None), getattr(c, "unfairness_score", None)) for c in material_risks]
-        print(f"[DEBUG_GLOBAL_RISK fallback] 5. materially-risky clauses (ID, risk_level, unfairness_score): {mat_info}", flush=True)
-
-        for c in raw_clauses:
-            reasons = []
-            if not is_risk_bearing_clause(c):
-                reasons.append(f"is_risk_bearing_false(is_risk_bearing={getattr(c, 'is_risk_bearing', None)}, kind={getattr(c, 'clause_kind', None)})")
-            r_level = (getattr(c, "risk_level", "LOW") or "LOW").upper()
-            if r_level in ("LOW", "NEUTRAL"):
-                reasons.append(f"risk_level_{r_level}")
-            unfairness = getattr(c, "unfairness_score", 0) or 0
-            if unfairness < 35:
-                reasons.append(f"unfairness_{unfairness}_lt_35")
-            if reasons:
-                print(f"[DEBUG_GLOBAL_RISK fallback] Clause {c.id} (kind={getattr(c, 'clause_kind', None)}, risk={r_level}, score={unfairness}) excluded: {', '.join(reasons)}", flush=True)
-
         if is_global:
             context_clauses = rank_risk_clauses(raw_clauses, limit=7)
         else:
@@ -98,9 +108,36 @@ async def chat_copilot(request: ChatStreamRequest):
                 sel = next((c for c in raw_clauses if c.id == request.selected_clause_id), None)
                 if sel:
                     context_clauses.append(sel)
+            # Find relevant clauses by query term matches
+            query_words = [w.lower() for w in query.split() if len(w) > 3]
+            scored_clauses = []
             for c in raw_clauses:
-                if c not in context_clauses and len(context_clauses) < 10:
+                if request.selected_clause_id and c.id == request.selected_clause_id:
+                    continue
+                c_text_lower = (c.title + " " + c.text).lower()
+                matches = sum(1 for w in query_words if w in c_text_lower)
+                if matches > 0:
+                    scored_clauses.append((matches, c))
+            scored_clauses.sort(key=lambda x: x[0], reverse=True)
+            for _, c in scored_clauses:
+                if len(context_clauses) < 7:
                     context_clauses.append(c)
+            for c in raw_clauses:
+                if c not in context_clauses and len(context_clauses) < 7:
+                    context_clauses.append(c)
+
+        # Opportunistically re-index session into RAG engine so future requests benefit from vector retrieval
+        if session_id and raw_clauses and not rag_engine.get_session(session_id):
+            try:
+                score_val = overall_fairness if isinstance(overall_fairness, int) else 50
+                rag_engine.index_document(
+                    session_id=session_id,
+                    filename=filename,
+                    clauses=raw_clauses,
+                    overall_fairness_score=score_val,
+                )
+            except Exception as e:
+                logger.warning(f"Could not re-index session {session_id} in RAG engine: {e}")
     else:
         logger.info(f"No active RAG session found for {session_id}. Answering with generic legal context.")
 
@@ -115,8 +152,7 @@ async def chat_copilot(request: ChatStreamRequest):
         "overall_fairness_score": overall_fairness,
     }
     context_ids = [c.id for c in context_clauses]
-    print(f"[DEBUG_GLOBAL_RISK] 6. final context_clauses IDs passed into stream_chat_response(): {context_ids}", flush=True)
-    logger.info(f"[DEBUG_GLOBAL_RISK] 6. final context_clauses IDs passed into stream_chat_response(): {context_ids}")
+    logger.info(f"Final context clauses passed to stream_chat_response: {context_ids}")
 
     event_stream = llm_service.stream_chat_response(
         session_id=session_id,

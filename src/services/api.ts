@@ -398,9 +398,16 @@ export interface ContractChatContext {
     id: string;
     title: string;
     text?: string;
+    originalText?: string;
     riskLevel?: string;
+    unfairnessScore?: number;
+    clauseKind?: string;
+    isRiskBearing?: boolean;
+    riskReasons?: string[];
+    category?: string;
     plainSummary?: string;
     suggestion?: string;
+    pageNumber?: number;
   }>;
 }
 

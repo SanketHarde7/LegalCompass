@@ -43,52 +43,25 @@ export const ChatPanel: React.FC = () => {
           content: m.content,
         }));
 
-      // Fix 4: Build comprehensive, intelligent contract context (no truncation to first 10)
+      // Build comprehensive canonical contract context for the full active document
       const allClauses = document.clauses;
-      const selectedIndex = selectedClauseId
-        ? allClauses.findIndex((c) => c.id === selectedClauseId)
-        : -1;
+      const canonicalClauses = allClauses.map((c) => ({
+        id: c.id,
+        title: c.title,
+        text: c.originalText,
+        originalText: c.originalText,
+        riskLevel: c.riskLevel,
+        unfairnessScore: c.unfairnessScore,
+        clauseKind: c.clauseKind,
+        isRiskBearing: c.isRiskBearing,
+        riskReasons: c.riskReasons,
+        category: c.category,
+        plainSummary: c.plainSummary,
+        suggestion: c.suggestion,
+        pageNumber: c.pageNumber,
+      }));
 
-      // Select relevant clauses based on selection, query keywords, and risk flags
-      const relevantSet = new Set<string>();
-
-      // 1. Include selected clause and adjacent neighbors (e.g. 14.1, 14.2, 14.3)
-      if (selectedIndex !== -1) {
-        relevantSet.add(allClauses[selectedIndex].id);
-        if (selectedIndex > 0) relevantSet.add(allClauses[selectedIndex - 1].id);
-        if (selectedIndex + 1 < allClauses.length) relevantSet.add(allClauses[selectedIndex + 1].id);
-      }
-
-      // 2. Include all HIGH risk clauses
-      allClauses.filter((c) => c.riskLevel === 'HIGH').forEach((c) => relevantSet.add(c.id));
-
-      // 3. Include clauses matching user query terms
-      const queryWords = promptText.toLowerCase().split(/\W+/).filter((w) => w.length > 3);
-      allClauses.forEach((c) => {
-        const textLower = (c.title + ' ' + c.originalText).toLowerCase();
-        if (queryWords.some((w) => textLower.includes(w))) {
-          relevantSet.add(c.id);
-        }
-      });
-
-      // 4. If still under 15 clauses, add more clauses up to 15
-      for (const c of allClauses) {
-        if (relevantSet.size >= 15) break;
-        relevantSet.add(c.id);
-      }
-
-      const selectedClauseObjects = allClauses
-        .filter((c) => relevantSet.has(c.id))
-        .map((c) => ({
-          id: c.id,
-          title: c.title,
-          text: c.originalText.slice(0, 450),
-          riskLevel: c.riskLevel,
-          plainSummary: c.plainSummary,
-          suggestion: c.suggestion,
-        }));
-
-      // Pass active document context so model always knows filename, score, full clause index, and key clauses
+      // Pass active document context so backend has complete canonical metadata even if RAG session expired
       const contractContext = {
         filename: document.filename,
         overallFairnessScore: document.overallFairnessScore,
@@ -99,7 +72,7 @@ export const ChatPanel: React.FC = () => {
           riskLevel: c.riskLevel,
           pageNumber: c.pageNumber,
         })),
-        clauses: selectedClauseObjects,
+        clauses: canonicalClauses,
       };
 
       const finalMessage = await sendChatMessage(

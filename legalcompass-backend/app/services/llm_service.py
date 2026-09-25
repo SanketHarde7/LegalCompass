@@ -402,7 +402,7 @@ class LLMService:
             query = session_id
             session_id = ""
         context_clauses = context_clauses or []
-        print(f"[DEBUG_GLOBAL_RISK] stream_chat_response received {len(context_clauses)} context_clauses: {[c.id for c in context_clauses]}", flush=True)
+        logger.info(f"stream_chat_response received {len(context_clauses)} context_clauses: {[c.id for c in context_clauses]}")
 
         allowed_clause_ids: Set[str] = {c.id for c in context_clauses} if context_clauses else set()
         system_message = self.format_chat_context(context_clauses, contract_info)
@@ -899,12 +899,12 @@ class LLMService:
         """Simulates realistic conversational streaming chunks based on context."""
         from app.services.rag_engine import is_global_risk_query, is_materially_risky_clause
 
-        print(f"[DEBUG_GLOBAL_RISK] _heuristic_stream entry: query='{query}', context={len(context)} clauses: {[c.id for c in context]}", flush=True)
+        logger.info(f"_heuristic_stream entry: query='{query}', context={len(context)} clauses: {[c.id for c in context]}")
 
         if is_global_risk_query(query) and context:
             # Filter strictly to materially risky clauses (HIGH or genuine MEDIUM)
             material_clauses = [c for c in context if is_materially_risky_clause(c)]
-            print(f"[DEBUG_GLOBAL_RISK] _heuristic_stream material_clauses: {len(material_clauses)} clauses: {[c.id for c in material_clauses]}", flush=True)
+            logger.info(f"_heuristic_stream material_clauses: {len(material_clauses)} clauses: {[c.id for c in material_clauses]}")
             if not material_clauses:
                 response_text = (
                     "Based on the canonical analysis of your agreement, no material legal risks or predatory operative provisions were detected. "
