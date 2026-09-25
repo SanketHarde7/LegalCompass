@@ -160,28 +160,36 @@ class LLMService:
             if provider == "groq":
                 groq = self._get_groq_client()
                 if groq:
-                    try:
-                        logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID}")
-                        chat_completion = await asyncio.wait_for(
-                            groq.chat.completions.create(
-                                messages=[
-                                    {"role": "system", "content": AUDITOR_PROMPT},
-                                    {"role": "user", "content": prompt},
-                                ],
-                                model=settings.GROQ_MODEL_ID,
-                                temperature=0.1,
-                                max_tokens=4096,
-                                response_format={"type": "json_object"},
-                            ),
-                            timeout=20.0,
-                        )
-                        raw_json = chat_completion.choices[0].message.content
-                        if raw_json:
-                            parsed = self._extract_json(raw_json)
-                            if parsed:
-                                return parsed
-                    except Exception as e:
-                        logger.warning(f"Groq call failed or timed out: {e}. Failing over to next provider...")
+                    for attempt in range(2):
+                        try:
+                            logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID} (attempt {attempt + 1})")
+                            chat_completion = await asyncio.wait_for(
+                                groq.chat.completions.create(
+                                    messages=[
+                                        {"role": "system", "content": AUDITOR_PROMPT},
+                                        {"role": "user", "content": prompt},
+                                    ],
+                                    model=settings.GROQ_MODEL_ID,
+                                    temperature=0.1,
+                                    max_tokens=4096,
+                                    response_format={"type": "json_object"},
+                                ),
+                                timeout=20.0,
+                            )
+                            raw_json = chat_completion.choices[0].message.content
+                            if raw_json:
+                                parsed = self._extract_json(raw_json)
+                                if parsed:
+                                    return parsed
+                            break
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "429" in err_msg and attempt == 0:
+                                logger.warning(f"Groq 429 TPM rate limit hit, backing off 3s before retry...")
+                                await asyncio.sleep(3.0)
+                                continue
+                            logger.warning(f"Groq call failed or timed out: {e}. Failing over to next provider...")
+                            break
 
             elif provider == "gemini":
                 gemini = self._get_gemini_client()
@@ -254,8 +262,8 @@ class LLMService:
         overview_snippets: List[str] = []
         total_batches = len(batches)
 
-        # Process batches concurrently (bounded by semaphore to respect rate limits)
-        sem = asyncio.Semaphore(3)
+        # Process batches sequentially (bounded by semaphore to respect rate limits)
+        sem = asyncio.Semaphore(1)
 
         async def _process_single_batch(batch_idx: int, batch: List[Clause]):
             async with sem:
