@@ -4,7 +4,9 @@ import type { ChatMessage } from '../types/chat';
 
 const API_BASE_URL =
   (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL) ||
-  'http://localhost:8000/api';
+  (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+    ? `${window.location.origin}/api`
+    : 'http://localhost:8000/api');
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,

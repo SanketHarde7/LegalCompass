@@ -1,17 +1,13 @@
 services:
-  # ---------------------------------------------------------------------------
-  # 1. LegalCompass FastAPI Backend
-  # ---------------------------------------------------------------------------
+  # ==============================================================================
+  # LegalCompass Unified Web Service (Frontend + Backend on 1 Single Free URL)
+  # ==============================================================================
   - type: web
-    name: legalcompass-backend
-    runtime: python
-    rootDir: legalcompass-backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    name: legalcompass
+    env: docker
     plan: free
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
       - key: ENVIRONMENT
         value: production
       - key: LLM_PROVIDER_ORDER
@@ -28,17 +24,3 @@ services:
         value: BAAI/bge-small-en-v1.5
       - key: BACKEND_CORS_ORIGINS
         value: '["*"]'
-
-  # ---------------------------------------------------------------------------
-  # 2. LegalCompass React Frontend (Static Site)
-  # ---------------------------------------------------------------------------
-  - type: web
-    name: legalcompass-frontend
-    runtime: static
-    buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    plan: free
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html

@@ -122,3 +122,38 @@ async def health_check():
             },
         },
     }
+
+
+# -----------------------------------------------------------------------------
+# Frontend Static Files & SPA Fallback (Enables Single Web Service Deployment)
+# -----------------------------------------------------------------------------
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+possible_dist_dirs = [
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "dist")),
+    os.path.abspath(os.path.join(os.getcwd(), "dist")),
+    os.path.abspath("dist"),
+]
+
+dist_dir = next(
+    (d for d in possible_dist_dirs if os.path.isdir(d) and os.path.exists(os.path.join(d, "index.html"))),
+    None,
+)
+
+if dist_dir:
+    logger.info(f"Mounted frontend static directory: {dist_dir}")
+    assets_dir = os.path.join(dist_dir, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path == "api":
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        file_path = os.path.join(dist_dir, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(dist_dir, "index.html"))
+
