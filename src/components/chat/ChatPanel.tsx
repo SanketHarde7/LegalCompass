@@ -150,7 +150,7 @@ export const ChatPanel: React.FC = () => {
                 backendConnected ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'
               }`}
             />
-            <span>{backendConnected ? 'Connected' : 'Mock Engine'}</span>
+            <span>{backendConnected ? 'Connected' : 'Offline'}</span>
           </div>
         </div>
       </div>

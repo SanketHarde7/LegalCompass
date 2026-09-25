@@ -16,7 +16,6 @@ export interface LawyerBriefModalProps {
 export const LawyerBriefModal: React.FC<LawyerBriefModalProps> = ({ isOpen, onClose }) => {
   const [isCopied, setIsCopied] = useState(false);
   const document = useAppStore((state) => state.document);
-  const activePresetKey = useAppStore((state) => state.activePresetKey);
 
   // Close on Escape key press
   useEffect(() => {
@@ -42,9 +41,11 @@ export const LawyerBriefModal: React.FC<LawyerBriefModalProps> = ({ isOpen, onCl
     day: 'numeric',
   });
 
+  const lowerName = document.filename.toLowerCase();
+
   // Tailored Questions for Attorney based on active contract type
   const getTailoredQuestions = (): string[] => {
-    if (activePresetKey === 'lease' || document.filename.toLowerCase().includes('lease')) {
+    if (lowerName.includes('lease') || lowerName.includes('tenan') || lowerName.includes('apartment')) {
       return [
         'Does local residential tenancy statute supersede the waiver of 24-hour advance written notice for landlord entry?',
         'Can we strike the 20% automatic rent escalation and restrict renewal increases to the local Consumer Price Index (CPI)?',
@@ -53,7 +54,7 @@ export const LawyerBriefModal: React.FC<LawyerBriefModalProps> = ({ isOpen, onCl
       ];
     }
 
-    if (activePresetKey === 'nda' || document.filename.toLowerCase().includes('nda')) {
+    if (lowerName.includes('nda') || lowerName.includes('confidential')) {
       return [
         'Does the definition of Confidential Information properly exclude information independently developed or already in our possession prior to execution?',
         'Can we add an explicit carve-out permitting disclosure to legal counsel and financial advisors under professional duty of confidentiality?',

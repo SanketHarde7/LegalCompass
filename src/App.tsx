@@ -9,11 +9,9 @@ import { useAppStore } from './store/useAppStore';
 export const App: React.FC = () => {
   const [isBriefModalOpen, setIsBriefModalOpen] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
-  const [uploadModalTab, setUploadModalTab] = useState<'presets' | 'upload'>('upload');
   const document = useAppStore((state) => state.document);
 
-  const handleOpenUpload = (tab: 'presets' | 'upload' = 'upload') => {
-    setUploadModalTab(tab);
+  const handleOpenUpload = () => {
     setIsUploadModalOpen(true);
   };
 
@@ -22,7 +20,6 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        setUploadModalTab('upload');
         setIsUploadModalOpen((prev) => !prev);
       }
 
@@ -40,11 +37,11 @@ export const App: React.FC = () => {
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#FAF9F6]">
       <Navbar
         onOpenBriefModal={() => setIsBriefModalOpen(true)}
-        onOpenUploadModal={() => handleOpenUpload('upload')}
+        onOpenUploadModal={handleOpenUpload}
       />
       <main className="flex-1 overflow-hidden">
         {document ? (
-          <SplitPane onOpenUploadModal={() => handleOpenUpload('upload')} />
+          <SplitPane onOpenUploadModal={handleOpenUpload} />
         ) : (
           <LandingHero />
         )}
@@ -55,7 +52,6 @@ export const App: React.FC = () => {
       />
       <UploadModal
         isOpen={isUploadModalOpen}
-        initialTab={uploadModalTab}
         onClose={() => setIsUploadModalOpen(false)}
       />
     </div>

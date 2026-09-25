@@ -4,15 +4,13 @@ import {
   FileText,
   AlertTriangle,
   Scale,
-  Briefcase,
-  Building,
-  ShieldCheck,
-  CheckCircle2,
+  ShieldAlert,
+  Search,
+  FileCheck,
   X,
 } from 'lucide-react';
 import { AnalysisProgress } from './AnalysisProgress';
 import { useAppStore } from '../../store/useAppStore';
-import { MOCK_PRESETS, type PresetKey } from '../../services/mockData';
 import { uploadContract } from '../../services/api';
 import type { ContractDocument } from '../../types/contract';
 
@@ -25,11 +23,9 @@ export const LandingHero: React.FC = () => {
     sizeFormatted: string;
   } | null>(null);
   const [pendingDoc, setPendingDoc] = useState<ContractDocument | null>(null);
-  const [pendingPresetKey, setPendingPresetKey] = useState<PresetKey | 'custom'>('freelance');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const setDocument = useAppStore((state) => state.setDocument);
-  const loadPreset = useAppStore((state) => state.loadPreset);
   const setUploading = useAppStore((state) => state.setUploading);
 
   const formatFileSize = (bytes: number): string => {
@@ -37,22 +33,6 @@ export const LandingHero: React.FC = () => {
       return `${Math.round(bytes / 1024)} KB`;
     }
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  const handleTriggerPreset = (key: PresetKey) => {
-    const doc = MOCK_PRESETS[key];
-    setErrorMessage(null);
-    setPendingDoc(null);
-    setPendingPresetKey(key);
-    setAnalyzingFileMeta({
-      name: doc.filename,
-      sizeFormatted: key === 'airtight' ? '2.4 MB' : '1.2 MB',
-    });
-    setUploading(true);
-    setIsAnalyzing(true);
-    setTimeout(() => {
-      setPendingDoc(doc);
-    }, 1200);
   };
 
   const handleProcessFile = async (file: File) => {
@@ -78,25 +58,14 @@ export const LandingHero: React.FC = () => {
     setUploading(true);
     setIsAnalyzing(true);
 
-    const isAirtight = file.name.toLowerCase().includes('airtight');
-
     try {
       const realDoc = await uploadContract(file);
       setPendingDoc(realDoc);
-      setPendingPresetKey('custom');
     } catch (err: any) {
       console.warn('Upload error:', err);
       setUploading(false);
       setIsAnalyzing(false);
       setPendingDoc(null);
-
-      // If user uploaded airtight document and backend failed/timed out, load the authentic 10-page preset
-      if (isAirtight) {
-        setPendingDoc(MOCK_PRESETS.airtight);
-        setPendingPresetKey('airtight');
-        setIsAnalyzing(true);
-        return;
-      }
 
       const rejectionMsg =
         err?.message ||
@@ -106,12 +75,8 @@ export const LandingHero: React.FC = () => {
   };
 
   const handleAnalysisComplete = () => {
-    if (pendingPresetKey === 'custom') {
-      if (pendingDoc) {
-        setDocument(pendingDoc, 'custom');
-      }
-    } else {
-      loadPreset(pendingPresetKey);
+    if (pendingDoc) {
+      setDocument(pendingDoc);
     }
     setUploading(false);
     setIsAnalyzing(false);
@@ -176,7 +141,7 @@ export const LandingHero: React.FC = () => {
                   {errorMessage}
                 </p>
                 <p className="text-[11px] text-rose-600/90 mt-2">
-                  Please upload a standard contract (e.g. Master Services Agreement, Lease, NDA, or Terms of Service) or pick one of the live sample agreements below.
+                  Please upload a standard contract (e.g. Master Services Agreement, Lease, NDA, or Terms of Service) to begin analysis.
                 </p>
               </div>
               <button
@@ -249,100 +214,42 @@ export const LandingHero: React.FC = () => {
               </div>
             </div>
 
-            {/* 1-Click Sample Trigger Buttons */}
-            <div className="space-y-2.5 pt-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-stone-400 block">
-                Or explore an instant sample agreement:
-              </span>
+            {/* Feature Highlights */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-left">
+              <div className="p-3.5 rounded-xl bg-white border border-stone-200 shadow-sm">
+                <div className="h-7 w-7 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 flex items-center justify-center mb-2">
+                  <ShieldAlert className="h-4 w-4" />
+                </div>
+                <div className="text-xs font-semibold text-stone-900">
+                  Substantive Risk Audit
+                </div>
+                <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                  Identifies predatory liabilities, unilateral cancellations, and hidden lock-ins.
+                </p>
+              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-left">
-                {/* Sample 1: Freelance */}
-                <button
-                  type="button"
-                  onClick={() => handleTriggerPreset('freelance')}
-                  className="p-3 rounded-xl bg-white hover:bg-rose-50/50 border border-stone-200 hover:border-rose-300 text-left transition-all active:scale-95 shadow-sm group"
-                >
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <div className="h-6 w-6 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 flex items-center justify-center flex-shrink-0">
-                      <Briefcase className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-rose-50 text-rose-800 border border-rose-200">
-                      42/100
-                    </span>
-                  </div>
-                  <div className="text-xs font-semibold text-stone-900 group-hover:text-rose-950 truncate">
-                    Freelance Dev MSA (5 Pages)
-                  </div>
-                  <p className="text-[11px] text-stone-500 mt-0.5 leading-snug line-clamp-2">
-                    IP forfeiture, uncapped indemnity &amp; 0-day exit.
-                  </p>
-                </button>
+              <div className="p-3.5 rounded-xl bg-white border border-stone-200 shadow-sm">
+                <div className="h-7 w-7 rounded-lg bg-stone-100 text-stone-800 border border-stone-200 flex items-center justify-center mb-2">
+                  <Search className="h-4 w-4" />
+                </div>
+                <div className="text-xs font-semibold text-stone-900">
+                  Verbatim Traceability
+                </div>
+                <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                  Every finding links directly to exact clauses and page offsets with zero hallucinations.
+                </p>
+              </div>
 
-                {/* Sample 2: Lease */}
-                <button
-                  type="button"
-                  onClick={() => handleTriggerPreset('lease')}
-                  className="p-3 rounded-xl bg-white hover:bg-amber-50/50 border border-stone-200 hover:border-amber-300 text-left transition-all active:scale-95 shadow-sm group"
-                >
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <div className="h-6 w-6 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 flex items-center justify-center flex-shrink-0">
-                      <Building className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
-                      55/100
-                    </span>
-                  </div>
-                  <div className="text-xs font-semibold text-stone-900 group-hover:text-amber-950 truncate">
-                    Apartment Lease (4 Pages)
-                  </div>
-                  <p className="text-[11px] text-stone-500 mt-0.5 leading-snug line-clamp-2">
-                    24/7 unannounced entry &amp; 20% automatic rent escalation.
-                  </p>
-                </button>
-
-                {/* Sample 3: NDA */}
-                <button
-                  type="button"
-                  onClick={() => handleTriggerPreset('nda')}
-                  className="p-3 rounded-xl bg-white hover:bg-emerald-50/50 border border-stone-200 hover:border-emerald-300 text-left transition-all active:scale-95 shadow-sm group"
-                >
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <div className="h-6 w-6 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center justify-center flex-shrink-0">
-                      <ShieldCheck className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                      89/100
-                    </span>
-                  </div>
-                  <div className="text-xs font-semibold text-stone-900 group-hover:text-emerald-950 truncate">
-                    Standard NDA (3 Pages)
-                  </div>
-                  <p className="text-[11px] text-stone-500 mt-0.5 leading-snug line-clamp-2">
-                    Reciprocal definitions, 2-year duration &amp; mutual remedies.
-                  </p>
-                </button>
-
-                {/* Sample 4: Airtight MSA */}
-                <button
-                  type="button"
-                  onClick={() => handleTriggerPreset('airtight')}
-                  className="p-3 rounded-xl bg-white hover:bg-emerald-50/70 border-2 border-emerald-300 hover:border-emerald-500 text-left transition-all active:scale-95 shadow-sm group"
-                >
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <div className="h-6 w-6 rounded-lg bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                      100/100
-                    </span>
-                  </div>
-                  <div className="text-xs font-semibold text-stone-900 group-hover:text-emerald-950 truncate">
-                    Airtight MSA (10 Pages)
-                  </div>
-                  <p className="text-[11px] text-emerald-700 font-medium mt-0.5 leading-snug line-clamp-2">
-                    Loophole-free: Net-30, conditional IP, mutual liability cap.
-                  </p>
-                </button>
+              <div className="p-3.5 rounded-xl bg-white border border-stone-200 shadow-sm">
+                <div className="h-7 w-7 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center justify-center mb-2">
+                  <FileCheck className="h-4 w-4" />
+                </div>
+                <div className="text-xs font-semibold text-stone-900">
+                  Counsel-Ready Briefs
+                </div>
+                <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                  Generates downloadable Attorney Briefs with structured counter-amendment redlines.
+                </p>
               </div>
             </div>
           </div>

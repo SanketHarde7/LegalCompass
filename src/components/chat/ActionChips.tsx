@@ -11,7 +11,13 @@ import {
   FileText,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { type PresetScenario } from '../../services/mockData';
+
+export interface ActionChipScenario {
+  id: string;
+  label: string;
+  prompt: string;
+  iconType: 'briefcase' | 'code' | 'clock' | 'shield' | 'key' | 'home' | 'dollar' | 'file';
+}
 
 export interface ActionChipsProps {
   onSelectScenario: (prompt: string) => void;
@@ -19,13 +25,14 @@ export interface ActionChipsProps {
 }
 
 export const ActionChips: React.FC<ActionChipsProps> = ({ onSelectScenario, isStreaming }) => {
-  const activePresetKey = useAppStore((state) => state.activePresetKey);
   const document = useAppStore((state) => state.document);
 
-  // Determine which scenario set to show
-  let currentScenarios: PresetScenario[] = [];
+  // Determine which scenario set to show based on contract topic
+  let currentScenarios: ActionChipScenario[] = [];
 
-  if (activePresetKey === 'lease' || (document && document.filename.toLowerCase().includes('lease'))) {
+  const lowerName = document?.filename?.toLowerCase() || '';
+
+  if (lowerName.includes('lease') || lowerName.includes('apartment') || lowerName.includes('tenan')) {
     currentScenarios = [
       {
         id: 'lease_entry',
@@ -46,7 +53,7 @@ export const ActionChips: React.FC<ActionChipsProps> = ({ onSelectScenario, isSt
         iconType: 'shield',
       },
     ];
-  } else if (activePresetKey === 'nda' || (document && document.filename.toLowerCase().includes('nda'))) {
+  } else if (lowerName.includes('nda') || lowerName.includes('confidential')) {
     currentScenarios = [
       {
         id: 'nda_lawyer',
@@ -68,7 +75,7 @@ export const ActionChips: React.FC<ActionChipsProps> = ({ onSelectScenario, isSt
       },
     ];
   } else {
-    // Freelance or general contract
+    // Services or general commercial agreement
     currentScenarios = [
       {
         id: 'free_cancel',
@@ -91,7 +98,7 @@ export const ActionChips: React.FC<ActionChipsProps> = ({ onSelectScenario, isSt
     ];
   }
 
-  const renderIcon = (type: PresetScenario['iconType']) => {
+  const renderIcon = (type: ActionChipScenario['iconType']) => {
     switch (type) {
       case 'briefcase':
         return <Briefcase className="h-3.5 w-3.5 text-stone-400" />;

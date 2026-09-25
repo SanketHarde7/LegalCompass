@@ -171,11 +171,8 @@ class DocumentParser:
             if any(
                 k in heading.upper()
                 for k in [
-                    "STANDARD LOOPHOLE-FREE",
                     "CONFIDENTIAL & PROPRIETARY",
                     "PAGE ",
-                    "AIRTIGHT COMMERCIAL MASTER SERVICES AGREEMENT",
-                    "MASTER SERVICES & PROFESSIONAL",
                 ]
             ):
                 continue

@@ -1,17 +1,11 @@
 import { create } from 'zustand';
 import type { ContractDocument, RiskLevel } from '../types/contract';
 import type { ChatMessage } from '../types/chat';
-import {
-  MOCK_PRESETS,
-  type PresetKey,
-  mockFreelanceDocument,
-} from '../services/mockData';
 import { checkBackendHealth } from '../services/api';
 
 export interface AppState {
   // State
   document: ContractDocument | null;
-  activePresetKey: PresetKey | 'custom' | null;
   selectedClauseId: string | null;
   activeRiskFilter: RiskLevel | 'ALL';
   chatMessages: ChatMessage[];
@@ -22,9 +16,7 @@ export interface AppState {
 
   // Actions
   setViewMode: (mode: 'PAGE' | 'CARD') => void;
-  loadMockDocument: () => void;
-  loadPreset: (key: PresetKey) => void;
-  setDocument: (document: ContractDocument | null, presetKey?: PresetKey | 'custom' | null) => void;
+  setDocument: (document: ContractDocument | null) => void;
   selectClause: (id: string | null) => void;
   setRiskFilter: (filter: RiskLevel | 'ALL') => void;
   addUserMessage: (content: string) => string; // Returns created message ID
@@ -89,7 +81,6 @@ function generateAuditGreeting(doc: ContractDocument): ChatMessage {
 export const useAppStore = create<AppState>((set) => ({
   // Initial state
   document: null,
-  activePresetKey: null,
   selectedClauseId: null,
   activeRiskFilter: 'ALL',
   activeViewMode: 'PAGE',
@@ -100,49 +91,11 @@ export const useAppStore = create<AppState>((set) => ({
 
   // Actions
   setViewMode: (mode) => set({ activeViewMode: mode }),
-  loadMockDocument: () => {
-    const greeting = generateAuditGreeting(mockFreelanceDocument);
-    const firstRiskBearing =
-      mockFreelanceDocument.clauses.find((c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c))?.id ??
-      mockFreelanceDocument.clauses.find((c) => isRiskBearingClause(c))?.id ??
-      null;
 
-    set({
-      document: mockFreelanceDocument,
-      activePresetKey: 'freelance',
-      chatMessages: [greeting],
-      selectedClauseId: firstRiskBearing,
-      activeRiskFilter: 'ALL',
-      isUploading: false,
-      isStreaming: false,
-    });
-  },
-
-  loadPreset: (key: PresetKey) => {
-    const doc = MOCK_PRESETS[key];
-    const greeting = generateAuditGreeting(doc);
-    const firstRiskBearing =
-      doc.clauses.find((c) => c.riskLevel === 'HIGH' && isRiskBearingClause(c))?.id ??
-      doc.clauses.find((c) => c.riskLevel === 'MEDIUM' && isRiskBearingClause(c))?.id ??
-      doc.clauses.find((c) => isRiskBearingClause(c))?.id ??
-      null;
-
-    set({
-      document: doc,
-      activePresetKey: key,
-      chatMessages: [greeting],
-      selectedClauseId: firstRiskBearing,
-      activeRiskFilter: 'ALL',
-      isUploading: false,
-      isStreaming: false,
-    });
-  },
-
-  setDocument: (document, presetKey = 'custom') => {
+  setDocument: (document) => {
     if (!document) {
       set({
         document: null,
-        activePresetKey: null,
         selectedClauseId: null,
         chatMessages: [],
         activeRiskFilter: 'ALL',
@@ -162,7 +115,6 @@ export const useAppStore = create<AppState>((set) => ({
 
     set({
       document,
-      activePresetKey: presetKey,
       selectedClauseId: initialClauseId,
       chatMessages: initialMessages,
       activeRiskFilter: 'ALL',

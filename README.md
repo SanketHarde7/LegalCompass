@@ -89,14 +89,6 @@ graph TD
 - Upload verification ensures non-legal documents (e.g. recipes, raw code, shopping lists) are rejected with a clear, polite explanation rather than hallucinating legal terms.
 - Copilot chat boundaries prevent off-topic drift, maintaining strict legal compliance.
 
-### 6. Four Curated 1-Click Contract Presets
-| Preset Contract | Type | Pages | Score | Key Traps / Safeguards |
-| :--- | :--- | :---: | :---: | :--- |
-| **Airtight MSA** | Enterprise MSA | **10** | **100/100** | Certified Loophole-Free: Net-30 terms, 1.5% late fee, conditional IP transfer, capped liability. |
-| **Freelance Dev MSA** | Contractor MSA | **5** | **42/100** | High Risk: Immediate IP forfeiture without pay, uncapped indemnification, 0-day cancellation. |
-| **Apartment Lease** | Residential Lease | **4** | **55/100** | Moderate Risk: 24/7 unannounced landlord entry, 20% automatic rent escalation, deposit wear deductions. |
-| **Mutual Standard NDA** | Reciprocal NDA | **3** | **89/100** | Fair & Balanced: 2-year survivability, standard trade secret carve-outs, mutual injunctive relief. |
-
 ---
 
 ## 🛠️ Technology Stack
@@ -121,34 +113,30 @@ graph TD
 
 ```text
 LegalCompass/
-├── public/                               # Static assets and sample contract PDFs
-│   ├── Airtight_Master_Services_Agreement.pdf  # 10-page benchmark MSA
-│   └── Sample_Freelance_Trap_Agreement.pdf     # Predatory mock agreement
+├── public/                               # Static web assets
 ├── src/                                  # Frontend Application Source
 │   ├── components/
 │   │   ├── common/
 │   │   │   ├── AnalysisProgress.tsx      # 3-stage animated analysis progress bar
-│   │   │   ├── LandingHero.tsx           # Hero dropzone with 1-click preset cards
+│   │   │   ├── LandingHero.tsx           # Hero dropzone with feature highlights
 │   │   │   ├── LawyerBriefModal.tsx      # Attorney brief export modal
-│   │   │   └── UploadModal.tsx           # Tabbed contract ingestion & dropzone modal
+│   │   │   └── UploadModal.tsx           # Contract ingestion & dropzone modal
 │   │   ├── document/
 │   │   │   ├── DocumentPanel.tsx         # Left panel host
 │   │   │   └── pageView/
-│   │   │       ├── PageCanvas.tsx        # 10-page reading canvas with verbatim text
+│   │   │       ├── PageCanvas.tsx        # Reading canvas with verbatim text
 │   │   │       ├── PageRail.tsx          # Vertical thumbnail navigation rail
 │   │   │       └── PageView.tsx          # Dual-scroll coordinator
 │   │   ├── layout/
-│   │   │   ├── Navbar.tsx                # Branding, preset dropdown, & upload trigger
+│   │   │   ├── Navbar.tsx                # Branding & upload trigger
 │   │   │   └── SplitPane.tsx             # Resizable split workspace
-│   │   └── simulation/
+│   │   └── chat/
+│   │       ├── ActionChips.tsx           # Suggested scenario prompts
 │   │       ├── ChatInput.tsx             # Copilot query input
 │   │       ├── ChatMessage.tsx           # Markdown message bubble with citations
-│   │       ├── ScenarioChips.tsx         # Suggested quick scenario prompts
-│   │       └── SimulationPanel.tsx       # Right copilot panel
+│   │       └── ChatPanel.tsx             # Copilot conversation panel
 │   ├── services/
-│   │   ├── airtightData.ts               # Complete 10-page / 18-clause Airtight MSA dataset
-│   │   ├── api.ts                        # Axios & fetch client with SSE streaming
-│   │   └── mockData.ts                   # Presets for Freelance, Lease, NDA & Airtight
+│   │   └── api.ts                        # Axios & fetch client with SSE streaming
 │   ├── store/
 │   │   └── useAppStore.ts                # Zustand central application store
 │   ├── types/                            # Contract & Chat TypeScript definitions

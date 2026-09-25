@@ -84,7 +84,7 @@ export interface UploadContractResponse {
 }
 ```
 
-#### Mock Response Payload (`mockData.ts`)
+#### Example Response Payload
 ```json
 {
   "session_id": "sess_9b8f21a4-67c2-489e-9d21-4fa2e95b001a",
@@ -241,7 +241,7 @@ export interface ScenarioSimulationResult {
 }
 ```
 
-#### Mock Response Payload (`mockData.ts`)
+#### Example Response Payload
 ```json
 {
   "scenario_title": "Client Delays Payment by 45 Days After Project Completion",

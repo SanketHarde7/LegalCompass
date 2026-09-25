@@ -18,21 +18,17 @@ Every engineer and AI agent operating within `legalcompass-frontend` must strict
   - Injecting raw CSS strings via styled-components or emotion.
 - **Permitted:** The single `src/index.css` file contains exclusively the `@tailwind base; @tailwind components; @tailwind utilities;` directives and core global font/reset rules.
 
-### Rule 2: Mock-First Architecture & Seamless Endpoint Toggling
-- **Mandate:** All network services in `src/services/api.ts` must implement transparent, zero-latency toggling between mock fixtures (`src/services/mockData.ts`) and real backend endpoints controlled via an environment variable:
-  ```env
-  VITE_USE_MOCK=true
-  ```
+### Rule 2: Production Backend Integration
+- **Mandate:** All network services in `src/services/api.ts` connect directly to the FastAPI backend defined by `VITE_API_BASE_URL` (defaulting to `http://localhost:8000/api`).
 - **Requirements:**
-  - When `VITE_USE_MOCK=true` (or if `VITE_USE_MOCK` is undefined in development), the service layer must return high-fidelity mock payloads with simulated network latency (`300ms–800ms`) and simulated SSE streaming chunks.
-  - When `VITE_USE_MOCK=false`, the service layer must communicate with the actual backend defined by `VITE_API_BASE_URL`.
-  - The rest of the application (hooks, stores, components) must have **zero knowledge** of whether mock or real endpoints are serving data.
+  - Real document upload, multi-page OCR extraction, and legal risk classification.
+  - Real SSE token streaming for AI chat interactions.
+  - Clean error propagation and graceful user notices when backend connectivity is offline.
 
 ### Rule 3: Zero Breaking Changes to API Contracts
 - **Mandate:** The types defined in `docs/contracts.md` are the single source of truth.
 - **Constraints:**
   - Do not modify, remove, or rename fields in `src/types/contract.ts`, `src/types/chat.ts`, `src/types/analysis.ts`, or `src/types/api.ts` without an explicit, approved refactoring request.
-  - All backend mock payloads in `src/services/mockData.ts` must validate 100% against the TypeScript contract types.
 
 ### Rule 4: Mandatory Legal Disclaimer & Safety Guardrails
 - **Mandate:** LegalCompass is an informational assistant for non-lawyers and must never position itself as certified legal counsel.
@@ -92,15 +88,10 @@ When implementing the Server-Sent Events (SSE) chat stream:
 
 ---
 
-## 5. Mock Data Fidelity Rules
-
-1. Mock data in `src/services/mockData.ts` must simulate realistic, high-stakes legal contracts (e.g., freelance design/dev agreement, residential tenancy, or SaaS vendor agreement).
-2. The mock dataset must contain:
-   - At least 4 distinct clauses spanning diverse categories (`PAYMENT_TERMS`, `INTELLECTUAL_PROPERTY`, `TERMINATION`, `INDEMNIFICATION`).
-   - A mix of `HIGH`, `MEDIUM`, and `LOW` risk levels.
-   - Realistic plain-English summaries that directly explain the practical risks for a freelancer or tenant.
-   - At least 2 pre-configured what-if simulation scenarios.
-3. Mock SSE streaming must yield simulated delays (e.g., 20ms–50ms between tokens) to enable authentic visual testing of the streaming copilot.
+## 5. Contract Fidelity & Heuristic Rules
+1. Document extraction must faithfully preserve physical page boundaries and verbatim text for exact legal citation.
+2. The heuristic engine classifies provisions based on substantive operative text and material risk indicators (e.g., uncapped indemnification, unilateral termination without pay, subjective acceptance lock-ins).
+3. Definitions, headings, and recitals must not be classified as high-risk or presented as actionable operative traps.
 
 ---
 
