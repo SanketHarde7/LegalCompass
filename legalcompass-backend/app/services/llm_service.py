@@ -150,6 +150,18 @@ class LLMService:
                 valid.append(p)
         return valid
 
+    def _get_gemini_candidate_models(self) -> List[str]:
+        """Returns ordered list of Gemini model candidates to attempt, preventing 404 deprecation."""
+        configured = (getattr(settings, "GEMINI_MODEL_ID", "") or "").strip()
+        candidates = [configured, "gemini-2.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
+        seen = set()
+        res = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                res.append(m)
+        return res
+
     # =========================================================================
     # Contract Analysis (JSON Mode)
     # =========================================================================
@@ -194,27 +206,34 @@ class LLMService:
             elif provider == "gemini":
                 gemini = self._get_gemini_client()
                 if gemini:
-                    try:
-                        logger.info(f"Invoking Gemini model: {settings.GEMINI_MODEL_ID}")
-                        response = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                gemini.models.generate_content,
-                                model=settings.GEMINI_MODEL_ID,
-                                contents=prompt,
-                                config={
-                                    "system_instruction": AUDITOR_PROMPT,
-                                    "response_mime_type": "application/json",
-                                    "temperature": 0.1,
-                                },
-                            ),
-                            timeout=25.0,
-                        )
-                        if response.text:
-                            parsed = self._extract_json(response.text)
-                            if parsed:
-                                return parsed
-                    except Exception as e:
-                        logger.warning(f"Gemini call failed or timed out: {e}.")
+                    for g_model in self._get_gemini_candidate_models():
+                        try:
+                            logger.info(f"Invoking Gemini model: {g_model}")
+                            response = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    gemini.models.generate_content,
+                                    model=g_model,
+                                    contents=prompt,
+                                    config={
+                                        "system_instruction": AUDITOR_PROMPT,
+                                        "response_mime_type": "application/json",
+                                        "temperature": 0.1,
+                                    },
+                                ),
+                                timeout=25.0,
+                            )
+                            if response.text:
+                                parsed = self._extract_json(response.text)
+                                if parsed:
+                                    return parsed
+                            break
+                        except Exception as e:
+                            err_str = str(e)
+                            if "404" in err_str:
+                                logger.warning(f"Gemini model {g_model} returned 404, trying next candidate...")
+                                continue
+                            logger.warning(f"Gemini call failed or timed out: {e}.")
+                            break
 
         return None
 
@@ -498,62 +517,70 @@ class LLMService:
             elif provider == "gemini":
                 gemini = self._get_gemini_client()
                 if gemini:
-                    emitted_visible_text = ""
-                    provider_raw_text = ""
-                    try:
-                        logger.info(f"Streaming chat via Gemini: {settings.GEMINI_MODEL_ID}")
-                        contents = []
-                        # Pass previous conversational memory turns
-                        if history:
-                            for h in history[-6:]:
-                                role = "model" if h.get("role") in ["assistant", "model"] else "user"
-                                text = (h.get("content") or "").strip()
-                                if text:
-                                    contents.append({"role": role, "parts": [{"text": text}]})
+                    for g_model in self._get_gemini_candidate_models():
+                        emitted_visible_text = ""
+                        provider_raw_text = ""
+                        try:
+                            logger.info(f"Streaming chat via Gemini: {g_model}")
+                            contents = []
+                            # Pass previous conversational memory turns
+                            if history:
+                                for h in history[-6:]:
+                                    role = "model" if h.get("role") in ["assistant", "model"] else "user"
+                                    text = (h.get("content") or "").strip()
+                                    if text:
+                                        contents.append({"role": role, "parts": [{"text": text}]})
 
-                        # Append current user prompt
-                        contents.append({"role": "user", "parts": [{"text": query}]})
+                            # Append current user prompt
+                            contents.append({"role": "user", "parts": [{"text": query}]})
 
-                        response_stream = gemini.models.generate_content_stream(
-                            model=settings.GEMINI_MODEL_ID,
-                            contents=contents,
-                            config={
-                                "system_instruction": system_message,
-                                "temperature": 0.2,
-                                "max_output_tokens": 1000,
-                            },
-                        )
-                        stream_filter = CitationStreamFilter()
-                        for chunk in response_stream:
-                            if chunk.text:
-                                provider_raw_text += chunk.text
-                                filtered = stream_filter.process_chunk(chunk.text)
-                                if filtered:
-                                    emitted_visible_text += filtered
-                                    payload = json.dumps({"type": "token", "content": filtered})
-                                    yield f"data: {payload}\n\n"
-                                    await asyncio.sleep(0.01)
+                            response_stream = gemini.models.generate_content_stream(
+                                model=g_model,
+                                contents=contents,
+                                config={
+                                    "system_instruction": system_message,
+                                    "temperature": 0.2,
+                                    "max_output_tokens": 1000,
+                                },
+                            )
+                            stream_filter = CitationStreamFilter()
+                            for chunk in response_stream:
+                                if chunk.text:
+                                    provider_raw_text += chunk.text
+                                    filtered = stream_filter.process_chunk(chunk.text)
+                                    if filtered:
+                                        emitted_visible_text += filtered
+                                        payload = json.dumps({"type": "token", "content": filtered})
+                                        yield f"data: {payload}\n\n"
+                                        await asyncio.sleep(0.01)
 
-                        flushed = stream_filter.flush()
-                        if flushed:
-                            emitted_visible_text += flushed
-                            payload = json.dumps({"type": "token", "content": flushed})
-                            yield f"data: {payload}\n\n"
+                            flushed = stream_filter.flush()
+                            if flushed:
+                                emitted_visible_text += flushed
+                                payload = json.dumps({"type": "token", "content": flushed})
+                                yield f"data: {payload}\n\n"
 
-                        if emitted_visible_text.strip():
-                            accumulated_raw_text = provider_raw_text
-                            streamed_success = True
-                        else:
-                            logger.warning("Gemini stream finished but produced zero usable visible text. Failing over...")
-                            accumulated_raw_text = ""
-                    except Exception as e:
-                        if emitted_visible_text.strip():
-                            logger.warning(f"Gemini streaming interrupted after partial output: {e}.")
-                            accumulated_raw_text = provider_raw_text
-                            streamed_success = True
-                        else:
-                            logger.warning(f"Gemini streaming failed: {e}. Failing over...")
-                            accumulated_raw_text = ""
+                            if emitted_visible_text.strip():
+                                accumulated_raw_text = provider_raw_text
+                                streamed_success = True
+                                break
+                            else:
+                                logger.warning(f"Gemini model {g_model} produced zero usable visible text.")
+                                accumulated_raw_text = ""
+                        except Exception as e:
+                            err_str = str(e)
+                            if "404" in err_str:
+                                logger.warning(f"Gemini model {g_model} returned 404, trying next candidate...")
+                                continue
+                            if emitted_visible_text.strip():
+                                logger.warning(f"Gemini streaming interrupted: {e}.")
+                                accumulated_raw_text = provider_raw_text
+                                streamed_success = True
+                                break
+                            else:
+                                logger.warning(f"Gemini streaming failed: {e}.")
+                                accumulated_raw_text = ""
+                                break
 
         # 3. Fallback Heuristic Generator
         if not streamed_success:
@@ -631,27 +658,34 @@ class LLMService:
             elif provider == "gemini":
                 gemini = self._get_gemini_client()
                 if gemini:
-                    try:
-                        logger.info(f"Simulating scenario via Gemini: {settings.GEMINI_MODEL_ID}")
-                        response = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                gemini.models.generate_content,
-                                model=settings.GEMINI_MODEL_ID,
-                                contents=user_msg,
-                                config={
-                                    "system_instruction": SIMULATION_PROMPT,
-                                    "response_mime_type": "application/json",
-                                    "temperature": 0.1,
-                                },
-                            ),
-                            timeout=25.0,
-                        )
-                        if response.text:
-                            data = self._extract_json(response.text)
-                            if data:
-                                return ScenarioSimulationResult(**data)
-                    except Exception as e:
-                        logger.warning(f"Gemini simulation failed or timed out: {e}. Failing over to next provider...")
+                    for g_model in self._get_gemini_candidate_models():
+                        try:
+                            logger.info(f"Simulating scenario via Gemini: {g_model}")
+                            response = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    gemini.models.generate_content,
+                                    model=g_model,
+                                    contents=user_msg,
+                                    config={
+                                        "system_instruction": SIMULATION_PROMPT,
+                                        "response_mime_type": "application/json",
+                                        "temperature": 0.1,
+                                    },
+                                ),
+                                timeout=25.0,
+                            )
+                            if response.text:
+                                data = self._extract_json(response.text)
+                                if data:
+                                    return ScenarioSimulationResult(**data)
+                            break
+                        except Exception as e:
+                            err_str = str(e)
+                            if "404" in err_str:
+                                logger.warning(f"Gemini model {g_model} returned 404, trying next candidate...")
+                                continue
+                            logger.warning(f"Gemini simulation failed or timed out: {e}.")
+                            break
 
         # 3. Fallback Heuristic
         return self._heuristic_simulate(prompt, context_clauses)

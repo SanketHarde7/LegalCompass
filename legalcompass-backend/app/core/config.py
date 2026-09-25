@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # Google Gemini API Settings (Dynamic from .env)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL_ID: str = "gemini-3.8-flash"
+    GEMINI_MODEL_ID: str = "gemini-2.5-flash"
 
     # Groq Cloud API Settings (Dynamic from .env)
     GROQ_API_KEY: str = ""

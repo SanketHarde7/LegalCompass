@@ -19,7 +19,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL_ID
-        value: gemini-3.8-flash
+        value: gemini-2.5-flash
       - key: EMBEDDING_MODEL
         value: BAAI/bge-small-en-v1.5
       - key: BACKEND_CORS_ORIGINS
