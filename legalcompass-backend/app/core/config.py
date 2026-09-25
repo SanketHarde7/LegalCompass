@@ -37,11 +37,11 @@ class Settings(BaseSettings):
 
     # Google Gemini API Settings (Dynamic from .env)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL_ID: str = "gemini-2.5-flash"
+    GEMINI_MODEL_ID: str = "gemini-3.5-flash-lite"
 
     # Groq Cloud API Settings (Dynamic from .env)
     GROQ_API_KEY: str = ""
-    GROQ_MODEL_ID: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL_ID: str = "openai/gpt-oss-20b"
 
     # Failover and provider preferences: e.g. "groq,gemini"
     LLM_PROVIDER_ORDER: str = "groq,gemini"
