@@ -43,8 +43,12 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL_ID: str = "openai/gpt-oss-20b"
 
-    # Failover and provider preferences: e.g. "groq,gemini"
-    LLM_PROVIDER_ORDER: str = "groq,gemini"
+    # OpenRouter API Settings (Dynamic from .env)
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL_ID: str = "nvidia/nemotron-3.5-lightning:free"
+
+    # Failover and provider preferences: e.g. "groq,gemini,openrouter"
+    LLM_PROVIDER_ORDER: str = "groq,gemini,openrouter"
 
     # Local ONNX Embedding Model (FastEmbed CPU)
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"

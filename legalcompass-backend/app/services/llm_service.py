@@ -138,14 +138,15 @@ class LLMService:
 
     def _get_provider_order(self) -> List[str]:
         """Returns ordered list of providers based on settings.LLM_PROVIDER_ORDER.
-        Defaults to ['groq', 'gemini'] as primary/failover.
+        Supports: 'groq', 'gemini', 'openrouter'.
+        Defaults to ['groq', 'gemini', 'openrouter'].
         """
-        raw = getattr(settings, "LLM_PROVIDER_ORDER", "") or "groq,gemini"
+        raw = getattr(settings, "LLM_PROVIDER_ORDER", "") or "groq,gemini,openrouter"
         providers = [p.strip().lower() for p in raw.split(",") if p.strip()]
-        valid = [p for p in providers if p in ("groq", "gemini")]
+        valid = [p for p in providers if p in ("groq", "gemini", "openrouter")]
         if not valid:
-            return ["groq", "gemini"]
-        for p in ("groq", "gemini"):
+            return ["groq", "gemini", "openrouter"]
+        for p in ("groq", "gemini", "openrouter"):
             if p not in valid:
                 valid.append(p)
         return valid
@@ -165,11 +166,23 @@ class LLMService:
             res.insert(0, "gemini-3.5-flash-lite")
         return res
 
+    def _get_openrouter_candidate_models(self) -> List[str]:
+        """Returns ordered list of OpenRouter candidate models."""
+        configured = (getattr(settings, "OPENROUTER_MODEL_ID", "") or "").strip()
+        candidates = [configured, "nvidia/nemotron-3.5-lightning:free", "qwen/qwen3.8-27b:free"]
+        seen = set()
+        res = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                res.append(m)
+        return res
+
     # =========================================================================
     # Contract Analysis (JSON Mode)
     # =========================================================================
     async def _call_llm_json(self, prompt: str) -> Optional[Dict[str, Any]]:
-        """Invokes Groq or Gemini with JSON mode according to provider preference order (Groq primary, Gemini failover)."""
+        """Invokes Groq, Gemini, or OpenRouter with JSON mode according to provider preference order."""
         providers = self._get_provider_order()
         for provider in providers:
             if provider == "groq":
@@ -233,6 +246,50 @@ class LLMService:
                                 continue
                             logger.warning(f"Gemini call failed or timed out: {e}.")
                             break
+
+            elif provider == "openrouter":
+                if not getattr(settings, "OPENROUTER_API_KEY", ""):
+                    continue
+                import httpx
+                for o_model in self._get_openrouter_candidate_models():
+                    try:
+                        logger.info(f"Invoking OpenRouter model: {o_model}")
+                        async with httpx.AsyncClient(timeout=20.0) as client:
+                            resp = await client.post(
+                                "https://openrouter.ai/api/v1/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                                    "HTTP-Referer": "https://legalcompass.com",
+                                    "X-Title": "LegalCompass",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "model": o_model,
+                                    "messages": [
+                                        {"role": "system", "content": AUDITOR_PROMPT},
+                                        {"role": "user", "content": prompt},
+                                    ],
+                                    "temperature": 0.1,
+                                    "max_tokens": 1500,
+                                    "response_format": {"type": "json_object"},
+                                },
+                            )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            raw_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                            if raw_content:
+                                parsed = self._extract_json(raw_content)
+                                if parsed:
+                                    return parsed
+                            break
+                        else:
+                            logger.warning(f"OpenRouter model {o_model} HTTP {resp.status_code}: {resp.text[:150]}")
+                            if resp.status_code in (429, 502, 503, 504):
+                                continue
+                            break
+                    except Exception as e:
+                        logger.warning(f"OpenRouter call failed or timed out: {e}")
+                        continue
 
         return None
 
@@ -581,6 +638,78 @@ class LLMService:
                                 accumulated_raw_text = ""
                                 break
 
+            elif provider == "openrouter":
+                if not getattr(settings, "OPENROUTER_API_KEY", ""):
+                    continue
+                import httpx
+                emitted_visible_text = ""
+                provider_raw_text = ""
+                try:
+                    logger.info(f"Streaming chat via OpenRouter: {settings.OPENROUTER_MODEL_ID}")
+                    messages = [{"role": "system", "content": system_message}]
+                    if history:
+                        for h in history[-6:]:
+                            role = "assistant" if h.get("role") in ["assistant", "model"] else "user"
+                            text = (h.get("content") or "").strip()
+                            if text:
+                                messages.append({"role": role, "content": text})
+                    messages.append({"role": "user", "content": query})
+
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        async with client.stream(
+                            "POST",
+                            "https://openrouter.ai/api/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                                "HTTP-Referer": "https://legalcompass.com",
+                                "X-Title": "LegalCompass",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": settings.OPENROUTER_MODEL_ID,
+                                "messages": messages,
+                                "temperature": 0.2,
+                                "max_tokens": 1000,
+                                "stream": True,
+                            },
+                        ) as stream_resp:
+                            if stream_resp.status_code == 200:
+                                stream_filter = CitationStreamFilter()
+                                async for line in stream_resp.aiter_lines():
+                                    if line.startswith("data: "):
+                                        chunk_str = line[6:].strip()
+                                        if chunk_str == "[DONE]":
+                                            break
+                                        try:
+                                            chunk_data = json.loads(chunk_str)
+                                            delta = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if delta:
+                                                provider_raw_text += delta
+                                                filtered = stream_filter.process_chunk(delta)
+                                                if filtered:
+                                                    emitted_visible_text += filtered
+                                                    payload = json.dumps({"type": "token", "content": filtered})
+                                                    yield f"data: {payload}\n\n"
+                                                    await asyncio.sleep(0.01)
+                                        except Exception:
+                                            pass
+
+                                flushed = stream_filter.flush()
+                                if flushed:
+                                    emitted_visible_text += flushed
+                                    payload = json.dumps({"type": "token", "content": flushed})
+                                    yield f"data: {payload}\n\n"
+
+                                if emitted_visible_text.strip():
+                                    accumulated_raw_text = provider_raw_text
+                                    streamed_success = True
+                except Exception as e:
+                    if emitted_visible_text.strip():
+                        accumulated_raw_text = provider_raw_text
+                        streamed_success = True
+                    else:
+                        logger.warning(f"OpenRouter streaming failed: {e}")
+
         # 3. Fallback Heuristic Generator
         if not streamed_success:
             logger.info("Executing heuristic streaming fallback...")
@@ -685,6 +814,40 @@ class LLMService:
                                 continue
                             logger.warning(f"Gemini simulation failed or timed out: {e}.")
                             break
+
+            elif provider == "openrouter":
+                if not getattr(settings, "OPENROUTER_API_KEY", ""):
+                    continue
+                import httpx
+                try:
+                    logger.info(f"Simulating scenario via OpenRouter: {settings.OPENROUTER_MODEL_ID}")
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        resp = await client.post(
+                            "https://openrouter.ai/api/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                                "HTTP-Referer": "https://legalcompass.com",
+                                "X-Title": "LegalCompass",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": settings.OPENROUTER_MODEL_ID,
+                                "messages": [
+                                    {"role": "system", "content": SIMULATION_PROMPT},
+                                    {"role": "user", "content": user_msg},
+                                ],
+                                "temperature": 0.1,
+                                "response_format": {"type": "json_object"},
+                            },
+                        )
+                    if resp.status_code == 200:
+                        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if raw:
+                            data = self._extract_json(raw)
+                            if data:
+                                return ScenarioSimulationResult(**data)
+                except Exception as e:
+                    logger.warning(f"OpenRouter simulation failed: {e}")
 
         # 3. Fallback Heuristic
         return self._heuristic_simulate(prompt, context_clauses)
