@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL_ID: str = "llama-3.3-70b-versatile"
 
-    # Failover and provider preferences: e.g. "gemini,groq"
-    LLM_PROVIDER_ORDER: str = "gemini,groq"
+    # Failover and provider preferences: e.g. "groq,gemini"
+    LLM_PROVIDER_ORDER: str = "groq,gemini"
 
     # Local ONNX Embedding Model (FastEmbed CPU)
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"

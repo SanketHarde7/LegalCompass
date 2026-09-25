@@ -136,61 +136,77 @@ class LLMService:
             self._groq_client = False
         return self._groq_client if self._groq_client is not False else None
 
+    def _get_provider_order(self) -> List[str]:
+        """Returns ordered list of providers based on settings.LLM_PROVIDER_ORDER.
+        Defaults to ['groq', 'gemini'] as primary/failover.
+        """
+        raw = getattr(settings, "LLM_PROVIDER_ORDER", "") or "groq,gemini"
+        providers = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        valid = [p for p in providers if p in ("groq", "gemini")]
+        if not valid:
+            return ["groq", "gemini"]
+        for p in ("groq", "gemini"):
+            if p not in valid:
+                valid.append(p)
+        return valid
+
     # =========================================================================
     # Contract Analysis (JSON Mode)
     # =========================================================================
     async def _call_llm_json(self, prompt: str) -> Optional[Dict[str, Any]]:
-        """Invokes Gemini or Groq with JSON mode and returns parsed dictionary."""
-        # 1. Try Gemini (Primary)
-        gemini = self._get_gemini_client()
-        if gemini:
-            try:
-                logger.info(f"Invoking Gemini model: {settings.GEMINI_MODEL_ID}")
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gemini.models.generate_content,
-                        model=settings.GEMINI_MODEL_ID,
-                        contents=prompt,
-                        config={
-                            "system_instruction": AUDITOR_PROMPT,
-                            "response_mime_type": "application/json",
-                            "temperature": 0.1,
-                        },
-                    ),
-                    timeout=25.0,
-                )
-                if response.text:
-                    parsed = self._extract_json(response.text)
-                    if parsed:
-                        return parsed
-            except Exception as e:
-                logger.warning(f"Gemini call failed or timed out: {e}. Failing over to Groq...")
+        """Invokes Groq or Gemini with JSON mode according to provider preference order (Groq primary, Gemini failover)."""
+        providers = self._get_provider_order()
+        for provider in providers:
+            if provider == "groq":
+                groq = self._get_groq_client()
+                if groq:
+                    try:
+                        logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID}")
+                        chat_completion = await asyncio.wait_for(
+                            groq.chat.completions.create(
+                                messages=[
+                                    {"role": "system", "content": AUDITOR_PROMPT},
+                                    {"role": "user", "content": prompt},
+                                ],
+                                model=settings.GROQ_MODEL_ID,
+                                temperature=0.1,
+                                max_tokens=4096,
+                                response_format={"type": "json_object"},
+                            ),
+                            timeout=20.0,
+                        )
+                        raw_json = chat_completion.choices[0].message.content
+                        if raw_json:
+                            parsed = self._extract_json(raw_json)
+                            if parsed:
+                                return parsed
+                    except Exception as e:
+                        logger.warning(f"Groq call failed or timed out: {e}. Failing over to next provider...")
 
-        # 2. Try Groq (Failover)
-        groq = self._get_groq_client()
-        if groq:
-            try:
-                logger.info(f"Invoking Groq model: {settings.GROQ_MODEL_ID}")
-                chat_completion = await asyncio.wait_for(
-                    groq.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": AUDITOR_PROMPT},
-                            {"role": "user", "content": prompt},
-                        ],
-                        model=settings.GROQ_MODEL_ID,
-                        temperature=0.1,
-                        max_tokens=4096,
-                        response_format={"type": "json_object"},
-                    ),
-                    timeout=20.0,
-                )
-                raw_json = chat_completion.choices[0].message.content
-                if raw_json:
-                    parsed = self._extract_json(raw_json)
-                    if parsed:
-                        return parsed
-            except Exception as e:
-                logger.warning(f"Groq call failed or timed out: {e}.")
+            elif provider == "gemini":
+                gemini = self._get_gemini_client()
+                if gemini:
+                    try:
+                        logger.info(f"Invoking Gemini model: {settings.GEMINI_MODEL_ID}")
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                gemini.models.generate_content,
+                                model=settings.GEMINI_MODEL_ID,
+                                contents=prompt,
+                                config={
+                                    "system_instruction": AUDITOR_PROMPT,
+                                    "response_mime_type": "application/json",
+                                    "temperature": 0.1,
+                                },
+                            ),
+                            timeout=25.0,
+                        )
+                        if response.text:
+                            parsed = self._extract_json(response.text)
+                            if parsed:
+                                return parsed
+                    except Exception as e:
+                        logger.warning(f"Gemini call failed or timed out: {e}.")
 
         return None
 
@@ -410,122 +426,126 @@ class LLMService:
         streamed_success = False
         accumulated_raw_text = ""
 
-        # 1. Try Gemini (Primary Engine with Multi-Turn Conversational Memory)
-        gemini = self._get_gemini_client()
-        if gemini:
-            emitted_visible_text = ""
-            provider_raw_text = ""
-            try:
-                logger.info(f"Streaming chat via Gemini: {settings.GEMINI_MODEL_ID}")
-                contents = []
-                # Pass previous conversational memory turns
-                if history:
-                    for h in history[-6:]:
-                        role = "model" if h.get("role") in ["assistant", "model"] else "user"
-                        text = (h.get("content") or "").strip()
-                        if text:
-                            contents.append({"role": role, "parts": [{"text": text}]})
+        # Iterate providers in preference order (Groq primary, Gemini failover)
+        for provider in self._get_provider_order():
+            if streamed_success:
+                break
 
-                # Append current user prompt
-                contents.append({"role": "user", "parts": [{"text": query}]})
+            if provider == "groq":
+                groq = self._get_groq_client()
+                if groq:
+                    emitted_visible_text = ""
+                    provider_raw_text = ""
+                    try:
+                        logger.info(f"Streaming chat via Groq: {settings.GROQ_MODEL_ID}")
+                        messages = [{"role": "system", "content": system_message}]
+                        if history:
+                            for h in history[-6:]:
+                                role = "assistant" if h.get("role") in ["assistant", "model"] else "user"
+                                text = (h.get("content") or "").strip()
+                                if text:
+                                    messages.append({"role": role, "content": text})
+                        messages.append({"role": "user", "content": query})
 
-                response_stream = gemini.models.generate_content_stream(
-                    model=settings.GEMINI_MODEL_ID,
-                    contents=contents,
-                    config={
-                        "system_instruction": system_message,
-                        "temperature": 0.2,
-                        "max_output_tokens": 1000,
-                    },
-                )
-                stream_filter = CitationStreamFilter()
-                for chunk in response_stream:
-                    if chunk.text:
-                        provider_raw_text += chunk.text
-                        filtered = stream_filter.process_chunk(chunk.text)
-                        if filtered:
-                            emitted_visible_text += filtered
-                            payload = json.dumps({"type": "token", "content": filtered})
+                        stream = await groq.chat.completions.create(
+                            model=settings.GROQ_MODEL_ID,
+                            messages=messages,
+                            temperature=0.2,
+                            max_tokens=1000,
+                            stream=True,
+                        )
+                        stream_filter = CitationStreamFilter()
+                        async for chunk in stream:
+                            delta = chunk.choices[0].delta.content or ""
+                            if delta:
+                                provider_raw_text += delta
+                                filtered = stream_filter.process_chunk(delta)
+                                if filtered:
+                                    emitted_visible_text += filtered
+                                    payload = json.dumps({"type": "token", "content": filtered})
+                                    yield f"data: {payload}\n\n"
+                                    await asyncio.sleep(0.01)
+
+                        flushed = stream_filter.flush()
+                        if flushed:
+                            emitted_visible_text += flushed
+                            payload = json.dumps({"type": "token", "content": flushed})
                             yield f"data: {payload}\n\n"
-                            await asyncio.sleep(0.01)
 
-                flushed = stream_filter.flush()
-                if flushed:
-                    emitted_visible_text += flushed
-                    payload = json.dumps({"type": "token", "content": flushed})
-                    yield f"data: {payload}\n\n"
+                        if emitted_visible_text.strip():
+                            accumulated_raw_text = provider_raw_text
+                            streamed_success = True
+                        else:
+                            logger.warning("Groq stream finished but produced zero usable visible text. Failing over...")
+                            accumulated_raw_text = ""
+                    except Exception as e:
+                        if emitted_visible_text.strip():
+                            logger.warning(f"Groq streaming interrupted after partial output: {e}.")
+                            accumulated_raw_text = provider_raw_text
+                            streamed_success = True
+                        else:
+                            logger.warning(f"Groq streaming failed: {e}. Failing over...")
+                            accumulated_raw_text = ""
 
-                if emitted_visible_text.strip():
-                    accumulated_raw_text = provider_raw_text
-                    streamed_success = True
-                else:
-                    logger.warning("Gemini stream finished but produced zero usable visible text. Failing over to Groq...")
-                    accumulated_raw_text = ""
-            except Exception as e:
-                if emitted_visible_text.strip():
-                    logger.warning(f"Gemini streaming interrupted after partial output: {e}.")
-                    accumulated_raw_text = provider_raw_text
-                    streamed_success = True
-                else:
-                    logger.warning(f"Gemini streaming failed: {e}. Failing over to Groq...")
-                    accumulated_raw_text = ""
+            elif provider == "gemini":
+                gemini = self._get_gemini_client()
+                if gemini:
+                    emitted_visible_text = ""
+                    provider_raw_text = ""
+                    try:
+                        logger.info(f"Streaming chat via Gemini: {settings.GEMINI_MODEL_ID}")
+                        contents = []
+                        # Pass previous conversational memory turns
+                        if history:
+                            for h in history[-6:]:
+                                role = "model" if h.get("role") in ["assistant", "model"] else "user"
+                                text = (h.get("content") or "").strip()
+                                if text:
+                                    contents.append({"role": role, "parts": [{"text": text}]})
 
-        # 2. Try Groq (Failover with Conversational Memory)
-        if not streamed_success:
-            groq = self._get_groq_client()
-            if groq:
-                emitted_visible_text = ""
-                provider_raw_text = ""
-                try:
-                    logger.info(f"Streaming chat via Groq: {settings.GROQ_MODEL_ID}")
-                    messages = [{"role": "system", "content": system_message}]
-                    if history:
-                        for h in history[-6:]:
-                            role = "assistant" if h.get("role") in ["assistant", "model"] else "user"
-                            text = (h.get("content") or "").strip()
-                            if text:
-                                messages.append({"role": role, "content": text})
-                    messages.append({"role": "user", "content": query})
+                        # Append current user prompt
+                        contents.append({"role": "user", "parts": [{"text": query}]})
 
-                    stream = await groq.chat.completions.create(
-                        model=settings.GROQ_MODEL_ID,
-                        messages=messages,
-                        temperature=0.2,
-                        max_tokens=1000,
-                        stream=True,
-                    )
-                    stream_filter = CitationStreamFilter()
-                    async for chunk in stream:
-                        delta = chunk.choices[0].delta.content or ""
-                        if delta:
-                            provider_raw_text += delta
-                            filtered = stream_filter.process_chunk(delta)
-                            if filtered:
-                                emitted_visible_text += filtered
-                                payload = json.dumps({"type": "token", "content": filtered})
-                                yield f"data: {payload}\n\n"
-                                await asyncio.sleep(0.01)
+                        response_stream = gemini.models.generate_content_stream(
+                            model=settings.GEMINI_MODEL_ID,
+                            contents=contents,
+                            config={
+                                "system_instruction": system_message,
+                                "temperature": 0.2,
+                                "max_output_tokens": 1000,
+                            },
+                        )
+                        stream_filter = CitationStreamFilter()
+                        for chunk in response_stream:
+                            if chunk.text:
+                                provider_raw_text += chunk.text
+                                filtered = stream_filter.process_chunk(chunk.text)
+                                if filtered:
+                                    emitted_visible_text += filtered
+                                    payload = json.dumps({"type": "token", "content": filtered})
+                                    yield f"data: {payload}\n\n"
+                                    await asyncio.sleep(0.01)
 
-                    flushed = stream_filter.flush()
-                    if flushed:
-                        emitted_visible_text += flushed
-                        payload = json.dumps({"type": "token", "content": flushed})
-                        yield f"data: {payload}\n\n"
+                        flushed = stream_filter.flush()
+                        if flushed:
+                            emitted_visible_text += flushed
+                            payload = json.dumps({"type": "token", "content": flushed})
+                            yield f"data: {payload}\n\n"
 
-                    if emitted_visible_text.strip():
-                        accumulated_raw_text = provider_raw_text
-                        streamed_success = True
-                    else:
-                        logger.warning("Groq stream finished but produced zero usable visible text. Using heuristic streaming fallback...")
-                        accumulated_raw_text = ""
-                except Exception as e:
-                    if emitted_visible_text.strip():
-                        logger.warning(f"Groq streaming interrupted after partial output: {e}.")
-                        accumulated_raw_text = provider_raw_text
-                        streamed_success = True
-                    else:
-                        logger.warning(f"Groq streaming failed: {e}. Using heuristic streaming fallback...")
-                        accumulated_raw_text = ""
+                        if emitted_visible_text.strip():
+                            accumulated_raw_text = provider_raw_text
+                            streamed_success = True
+                        else:
+                            logger.warning("Gemini stream finished but produced zero usable visible text. Failing over...")
+                            accumulated_raw_text = ""
+                    except Exception as e:
+                        if emitted_visible_text.strip():
+                            logger.warning(f"Gemini streaming interrupted after partial output: {e}.")
+                            accumulated_raw_text = provider_raw_text
+                            streamed_success = True
+                        else:
+                            logger.warning(f"Gemini streaming failed: {e}. Failing over...")
+                            accumulated_raw_text = ""
 
         # 3. Fallback Heuristic Generator
         if not streamed_success:
@@ -573,56 +593,57 @@ class LLMService:
         context_str = "\n\n".join([f"[{c.id}] {c.title}:\n{c.text}" for c in context_clauses])
         user_msg = f"Scenario Prompt: {prompt}\n\nContextual Contract Clauses:\n{context_str}"
 
-        # 1. Try Gemini
-        gemini = self._get_gemini_client()
-        if gemini:
-            try:
-                logger.info(f"Simulating scenario via Gemini: {settings.GEMINI_MODEL_ID}")
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gemini.models.generate_content,
-                        model=settings.GEMINI_MODEL_ID,
-                        contents=user_msg,
-                        config={
-                            "system_instruction": SIMULATION_PROMPT,
-                            "response_mime_type": "application/json",
-                            "temperature": 0.1,
-                        },
-                    ),
-                    timeout=25.0,
-                )
-                if response.text:
-                    data = self._extract_json(response.text)
-                    if data:
-                        return ScenarioSimulationResult(**data)
-            except Exception as e:
-                logger.warning(f"Gemini simulation failed or timed out: {e}. Failing over to Groq...")
+        for provider in self._get_provider_order():
+            if provider == "groq":
+                groq = self._get_groq_client()
+                if groq:
+                    try:
+                        logger.info(f"Simulating scenario via Groq: {settings.GROQ_MODEL_ID}")
+                        comp = await asyncio.wait_for(
+                            groq.chat.completions.create(
+                                model=settings.GROQ_MODEL_ID,
+                                messages=[
+                                    {"role": "system", "content": SIMULATION_PROMPT},
+                                    {"role": "user", "content": user_msg},
+                                ],
+                                response_format={"type": "json_object"},
+                                temperature=0.1,
+                                max_tokens=2048,
+                            ),
+                            timeout=20.0,
+                        )
+                        raw = comp.choices[0].message.content
+                        if raw:
+                            data = self._extract_json(raw)
+                            if data:
+                                return ScenarioSimulationResult(**data)
+                    except Exception as e:
+                        logger.warning(f"Groq simulation failed or timed out: {e}. Failing over to next provider...")
 
-        # 2. Try Groq
-        groq = self._get_groq_client()
-        if groq:
-            try:
-                logger.info(f"Simulating scenario via Groq: {settings.GROQ_MODEL_ID}")
-                comp = await asyncio.wait_for(
-                    groq.chat.completions.create(
-                        model=settings.GROQ_MODEL_ID,
-                        messages=[
-                            {"role": "system", "content": SIMULATION_PROMPT},
-                            {"role": "user", "content": user_msg},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.1,
-                        max_tokens=2048,
-                    ),
-                    timeout=20.0,
-                )
-                raw = comp.choices[0].message.content
-                if raw:
-                    data = self._extract_json(raw)
-                    if data:
-                        return ScenarioSimulationResult(**data)
-            except Exception as e:
-                logger.warning(f"Groq simulation failed or timed out: {e}. Using heuristic simulation...")
+            elif provider == "gemini":
+                gemini = self._get_gemini_client()
+                if gemini:
+                    try:
+                        logger.info(f"Simulating scenario via Gemini: {settings.GEMINI_MODEL_ID}")
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                gemini.models.generate_content,
+                                model=settings.GEMINI_MODEL_ID,
+                                contents=user_msg,
+                                config={
+                                    "system_instruction": SIMULATION_PROMPT,
+                                    "response_mime_type": "application/json",
+                                    "temperature": 0.1,
+                                },
+                            ),
+                            timeout=25.0,
+                        )
+                        if response.text:
+                            data = self._extract_json(response.text)
+                            if data:
+                                return ScenarioSimulationResult(**data)
+                    except Exception as e:
+                        logger.warning(f"Gemini simulation failed or timed out: {e}. Failing over to next provider...")
 
         # 3. Fallback Heuristic
         return self._heuristic_simulate(prompt, context_clauses)
