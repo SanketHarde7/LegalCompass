@@ -2,6 +2,7 @@ import re
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple, Set
 from app.core.config import settings
@@ -345,40 +346,85 @@ class LLMService:
         overview_snippets: List[str] = []
         total_batches = len(batches)
 
-        # Process batches sequentially; track providers that fail deterministically
-        # so they are not retried on every batch (saves TPM quota and time).
+        # Process Batch 1 alone first to detect deterministic failures and prevent Groq TPM spikes.
+        # Then process remaining batches concurrently with bounded parallelism (max 3 concurrent).
         skip_providers: Set[str] = set()
+        all_batch_results: List[Optional[Dict[str, Any]]] = []
+        start_time = time.perf_counter()
 
-        for batch_idx, batch in enumerate(batches):
-            structured_clauses = [
+        if total_batches > 0:
+            b1_start = time.perf_counter()
+            structured_clauses_1 = [
                 {"clause_id": c.id, "title": c.title, "text": c.text}
-                for c in batch
+                for c in batches[0]
             ]
-            batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
-            prompt = (
+            batch_header_1 = f" (Batch 1 of {total_batches})" if total_batches > 1 else ""
+            prompt_1 = (
                 f"Contract Filename: {filename}\n"
                 f"Document Title: {document_title or 'N/A'}\n\n"
-                f"Input Clauses to Audit{batch_header}:\n"
-                f"{json.dumps(structured_clauses, indent=2)}\n\n"
+                f"Input Clauses to Audit{batch_header_1}:\n"
+                f"{json.dumps(structured_clauses_1, indent=2)}\n\n"
                 "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
             )
             try:
-                batch_res = await self._call_llm_json(prompt, _skip_providers=skip_providers)
+                batch_1_res = await self._call_llm_json(prompt_1, _skip_providers=skip_providers)
             except Exception as e:
                 err_msg = str(e)
                 if "json_validate_failed" in err_msg or "invalid_request_error" in err_msg:
-                    logger.warning(f"Batch {batch_idx + 1}: Groq deterministic error, skipping Groq for remaining batches")
+                    logger.warning("Batch 1: Groq deterministic error, skipping Groq for remaining batches")
                     skip_providers.add("groq")
                     # Retry this batch without Groq
                     try:
-                        batch_res = await self._call_llm_json(prompt, _skip_providers=skip_providers)
+                        batch_1_res = await self._call_llm_json(prompt_1, _skip_providers=skip_providers)
                     except Exception as e2:
-                        logger.warning(f"Batch {batch_idx + 1} retry also failed: {e2}")
-                        batch_res = None
+                        logger.warning(f"Batch 1 retry also failed: {e2}")
+                        batch_1_res = None
                 else:
-                    logger.warning(f"Batch {batch_idx + 1} analysis failed: {e}")
-                    batch_res = None
+                    logger.warning(f"Batch 1 analysis failed: {e}")
+                    batch_1_res = None
 
+            all_batch_results.append(batch_1_res)
+            logger.info(f"Batch 1 completed in {time.perf_counter() - b1_start:.2f}s")
+
+            # After batch 1 processing (success or fail), unconditionally skip Groq for subsequent concurrent batches:
+            skip_providers.add("groq")
+
+        # Concurrently process remaining batches (batch 2 onward) with bounded parallelism (max 3 concurrent)
+        if total_batches > 1:
+            concurrent_start = time.perf_counter()
+            semaphore = asyncio.Semaphore(3)
+
+            async def process_batch(batch_idx: int, batch: List[Clause]):
+                async with semaphore:
+                    b_start = time.perf_counter()
+                    structured_clauses = [{"clause_id": c.id, "title": c.title, "text": c.text} for c in batch]
+                    batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
+                    prompt = (
+                        f"Contract Filename: {filename}\n"
+                        f"Document Title: {document_title or 'N/A'}\n\n"
+                        f"Input Clauses to Audit{batch_header}:\n"
+                        f"{json.dumps(structured_clauses, indent=2)}\n\n"
+                        "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause "
+                        "evaluated, and output strictly valid JSON according to instructions."
+                    )
+                    try:
+                        res = await self._call_llm_json(prompt, _skip_providers=skip_providers)
+                        logger.info(f"Batch {batch_idx + 1} completed in {time.perf_counter() - b_start:.2f}s")
+                        return res
+                    except Exception as e:
+                        logger.warning(f"Batch {batch_idx + 1} analysis failed: {e}")
+                        return None
+
+            remaining_results = await asyncio.gather(
+                *[process_batch(i, b) for i, b in enumerate(batches[1:], start=1)]
+            )
+            all_batch_results.extend(remaining_results)
+            logger.info(f"Remaining {total_batches - 1} batches completed concurrently in {time.perf_counter() - concurrent_start:.2f}s")
+
+        logger.info(f"All {total_batches} batches finished in total {time.perf_counter() - start_time:.2f}s")
+
+        # Merge results from all batches (order-independent matching keyed by clause_id)
+        for batch_res in all_batch_results:
             if isinstance(batch_res, dict) and "clauses" in batch_res:
                 for cd in batch_res.get("clauses", []):
                     all_evaluated_clauses.append(cd)
