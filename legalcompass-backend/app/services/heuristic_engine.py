@@ -261,6 +261,7 @@ class HeuristicEngine:
         title: str,
         text: str,
         all_clauses: Optional[List[Any]] = None,
+        _label_index: Optional[Dict[str, Any]] = None,
     ) -> HeuristicAssessment:
         """Evaluates clause text using structural pre-screening + semantic analysis + cross-reference resolution."""
         full_text = f"{title}\n{text}".strip()
@@ -296,8 +297,10 @@ class HeuristicEngine:
 
         # Dynamic cross-reference resolution against active document clauses
         resolved_refs: List[ResolvedReference] = []
-        if all_clauses:
-            resolved_refs = self.resolve_referenced_clauses({"title": title, "text": text}, all_clauses)
+        if all_clauses or _label_index:
+            resolved_refs = self.resolve_referenced_clauses(
+                {"title": title, "text": text}, all_clauses, precomputed_index=_label_index
+            )
             for ref in resolved_refs:
                 if ref.relation in ("mitigates", "limits"):
                     target_text_lower = str(_get_clause_attr(ref.target_clause, "text", "")).lower()
@@ -505,17 +508,33 @@ class HeuristicEngine:
     # Cross-Reference Resolution
     # =========================================================================
 
+    def build_label_index(self, all_clauses: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """Builds a normalized-label -> clause lookup once per document, instead of
+        rebuilding it on every evaluate_clause() call. Does NOT exclude any clause by id —
+        self-exclusion happens at lookup time in resolve_referenced_clauses instead."""
+        label_index: Dict[str, Any] = {}
+        if not all_clauses:
+            return label_index
+        for c in all_clauses:
+            c_label = self._extract_clause_label(c)
+            if c_label:
+                norm_label = c_label.lower().strip()
+                if norm_label not in label_index:
+                    label_index[norm_label] = c
+        return label_index
+
     def resolve_referenced_clauses(
         self,
         current_clause: Any,
         all_clauses: Optional[List[Any]] = None,
+        precomputed_index: Optional[Dict[str, Any]] = None,
     ) -> List[ResolvedReference]:
         """Dynamically identifies and resolves explicit cross-references (e.g. Section X, Clause Y)
         in current_clause against all_clauses parsed from the active document.
 
         Returns only confidently resolved references. Never guesses or fabricates target clauses.
         """
-        if not all_clauses:
+        if not all_clauses and not precomputed_index:
             return []
 
         text = str(_get_clause_attr(current_clause, "text", "")).strip()
@@ -527,19 +546,8 @@ class HeuristicEngine:
         if not matches:
             return []
 
-        # Index all_clauses by normalized label
         current_id = str(_get_clause_attr(current_clause, "id", ""))
-        label_index: Dict[str, Any] = {}
-        for c in all_clauses:
-            cid = str(_get_clause_attr(c, "id", ""))
-            if current_id and cid == current_id:
-                continue
-
-            c_label = self._extract_clause_label(c)
-            if c_label:
-                norm_label = c_label.lower().strip()
-                if norm_label not in label_index:
-                    label_index[norm_label] = c
+        label_index = precomputed_index if precomputed_index is not None else self.build_label_index(all_clauses)
 
         resolved: List[ResolvedReference] = []
         seen_targets = set()
@@ -550,7 +558,10 @@ class HeuristicEngine:
             if not target_clause:
                 continue
 
+            # Self-exclusion: skip if the resolved target is the current clause itself
             target_id = str(_get_clause_attr(target_clause, "id", "")) or norm_ref
+            if current_id and target_id == current_id:
+                continue
             if target_id in seen_targets:
                 continue
             seen_targets.add(target_id)
@@ -1259,9 +1270,13 @@ class HeuristicEngine:
 heuristic_engine = HeuristicEngine()
 
 
-def resolve_referenced_clauses(current_clause: Any, all_clauses: Optional[List[Any]] = None) -> List[ResolvedReference]:
+def resolve_referenced_clauses(
+    current_clause: Any,
+    all_clauses: Optional[List[Any]] = None,
+    precomputed_index: Optional[Dict[str, Any]] = None,
+) -> List[ResolvedReference]:
     """Module-level convenience wrapper for heuristic_engine.resolve_referenced_clauses."""
-    return heuristic_engine.resolve_referenced_clauses(current_clause, all_clauses)
+    return heuristic_engine.resolve_referenced_clauses(current_clause, all_clauses, precomputed_index=precomputed_index)
 
 
 def passes_triple_gate(title: str, text: str, assessment: Optional[HeuristicAssessment] = None) -> bool:

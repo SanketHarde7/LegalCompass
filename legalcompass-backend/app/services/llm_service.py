@@ -181,10 +181,15 @@ class LLMService:
     # =========================================================================
     # Contract Analysis (JSON Mode)
     # =========================================================================
-    async def _call_llm_json(self, prompt: str) -> Optional[Dict[str, Any]]:
-        """Invokes Groq, Gemini, or OpenRouter with JSON mode according to provider preference order."""
+    async def _call_llm_json(self, prompt: str, _skip_providers: Optional[Set[str]] = None) -> Optional[Dict[str, Any]]:
+        """Invokes Groq, Gemini, or OpenRouter with JSON mode according to provider preference order.
+        _skip_providers: if set, skip these providers (used to avoid retrying Groq after deterministic failures).
+        """
         providers = self._get_provider_order()
+        skip = _skip_providers or set()
         for provider in providers:
+            if provider in skip:
+                continue
             if provider == "groq":
                 groq = self._get_groq_client()
                 if groq:
@@ -198,7 +203,7 @@ class LLMService:
                                 ],
                                 model=settings.GROQ_MODEL_ID,
                                 temperature=0.1,
-                                max_tokens=1500,
+                                max_tokens=3000,
                                 response_format={"type": "json_object"},
                             ),
                             timeout=15.0,
@@ -212,6 +217,9 @@ class LLMService:
                         err_msg = str(e)
                         if "429" in err_msg:
                             logger.warning(f"Groq 429 rate limit hit. Failing over immediately to next provider: {e}")
+                        elif "json_validate_failed" in err_msg or "invalid_request_error" in err_msg:
+                            logger.warning(f"Groq deterministic error (will skip for remaining batches): {e}")
+                            raise  # Let caller catch and skip Groq for remaining batches
                         else:
                             logger.warning(f"Groq call failed or timed out: {e}. Failing over to next provider...")
 
@@ -337,35 +345,40 @@ class LLMService:
         overview_snippets: List[str] = []
         total_batches = len(batches)
 
-        # Process batches sequentially (bounded by semaphore to respect rate limits)
-        sem = asyncio.Semaphore(1)
+        # Process batches sequentially; track providers that fail deterministically
+        # so they are not retried on every batch (saves TPM quota and time).
+        skip_providers: Set[str] = set()
 
-        async def _process_single_batch(batch_idx: int, batch: List[Clause]):
-            async with sem:
-                structured_clauses = [
-                    {"clause_id": c.id, "title": c.title, "text": c.text}
-                    for c in batch
-                ]
-                batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
-                prompt = (
-                    f"Contract Filename: {filename}\n"
-                    f"Document Title: {document_title or 'N/A'}\n\n"
-                    f"Input Clauses to Audit{batch_header}:\n"
-                    f"{json.dumps(structured_clauses, indent=2)}\n\n"
-                    "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
-                )
-                try:
-                    return await self._call_llm_json(prompt)
-                except Exception as e:
+        for batch_idx, batch in enumerate(batches):
+            structured_clauses = [
+                {"clause_id": c.id, "title": c.title, "text": c.text}
+                for c in batch
+            ]
+            batch_header = f" (Batch {batch_idx + 1} of {total_batches})" if total_batches > 1 else ""
+            prompt = (
+                f"Contract Filename: {filename}\n"
+                f"Document Title: {document_title or 'N/A'}\n\n"
+                f"Input Clauses to Audit{batch_header}:\n"
+                f"{json.dumps(structured_clauses, indent=2)}\n\n"
+                "Audit each of the above clauses. Echo back the exact 'clause_id' for every clause evaluated, and output strictly valid JSON according to instructions."
+            )
+            try:
+                batch_res = await self._call_llm_json(prompt, _skip_providers=skip_providers)
+            except Exception as e:
+                err_msg = str(e)
+                if "json_validate_failed" in err_msg or "invalid_request_error" in err_msg:
+                    logger.warning(f"Batch {batch_idx + 1}: Groq deterministic error, skipping Groq for remaining batches")
+                    skip_providers.add("groq")
+                    # Retry this batch without Groq
+                    try:
+                        batch_res = await self._call_llm_json(prompt, _skip_providers=skip_providers)
+                    except Exception as e2:
+                        logger.warning(f"Batch {batch_idx + 1} retry also failed: {e2}")
+                        batch_res = None
+                else:
                     logger.warning(f"Batch {batch_idx + 1} analysis failed: {e}")
-                    return None
+                    batch_res = None
 
-        batch_results = await asyncio.gather(
-            *[_process_single_batch(idx, b) for idx, b in enumerate(batches)],
-            return_exceptions=True,
-        )
-
-        for batch_res in batch_results:
             if isinstance(batch_res, dict) and "clauses" in batch_res:
                 for cd in batch_res.get("clauses", []):
                     all_evaluated_clauses.append(cd)
@@ -385,8 +398,9 @@ class LLMService:
                 "summary_overview": merged_overview,
                 "clauses": all_evaluated_clauses,
             }
-            return self._build_document_from_json(
-                session_id, filename, merged_data, initial_clauses, page_objects, document_title
+            return await asyncio.to_thread(
+                self._build_document_from_json,
+                session_id, filename, merged_data, initial_clauses, page_objects, document_title,
             )
 
         # 3. Fallback: Heuristic Legal Auditor
@@ -898,13 +912,14 @@ class LLMService:
 
         analyzed_clauses: List[Clause] = []
         if initial_clauses:
+            label_index = heuristic_engine.build_label_index(initial_clauses)
             for idx, orig_clause in enumerate(initial_clauses, start=1):
                 # Match strictly on returned clause_id against original clause_id
                 matched_cd = llm_map.get(orig_clause.id)
 
                 # STEP 1: Heuristic structural classifier is the authoritative ground truth for structure
                 heuristic_check = heuristic_engine.evaluate_clause(
-                    orig_clause.title, orig_clause.text, all_clauses=initial_clauses
+                    orig_clause.title, orig_clause.text, all_clauses=initial_clauses, _label_index=label_index
                 )
                 trusted_clause_kind = heuristic_check.clause_kind
                 trusted_is_risk_bearing = heuristic_check.is_risk_bearing
@@ -1035,9 +1050,10 @@ class LLMService:
     ) -> ContractDocument:
         """Deterministic structural rule-based legal engine with structural pre-screening + Triple Gate."""
         evaluated_clauses: List[Clause] = []
+        label_index = heuristic_engine.build_label_index(initial_clauses)
 
         for idx, clause in enumerate(initial_clauses, start=1):
-            assessment = heuristic_engine.evaluate_clause(clause.title, clause.text, all_clauses=initial_clauses)
+            assessment = heuristic_engine.evaluate_clause(clause.title, clause.text, all_clauses=initial_clauses, _label_index=label_index)
             evaluated_clauses.append(
                 Clause(
                     id=clause.id,

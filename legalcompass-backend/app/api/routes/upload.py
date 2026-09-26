@@ -5,6 +5,7 @@ from app.schemas.contract import UploadContractResponse, ContractDocument
 from app.services.document_parser import document_parser
 from app.services.rag_engine import rag_engine
 from app.services.llm_service import llm_service
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,8 @@ async def upload_contract(
 
     # 5. Index Clauses in FastEmbed in-memory RAG
     try:
-        rag_engine.index_document(
+        await asyncio.to_thread(
+            rag_engine.index_document,
             session_id=analyzed_doc.session_id,
             filename=filename,
             clauses=analyzed_doc.clauses,
