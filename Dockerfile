@@ -22,9 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-cache FastEmbed embedding model into image during build so runtime uploads don't stall
-RUN python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-small-en-v1.5').embed(['warmup']))"
-
 # Copy backend app
 COPY legalcompass-backend/app ./app
 

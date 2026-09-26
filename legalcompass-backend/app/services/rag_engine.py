@@ -183,17 +183,10 @@ class RAGEngine:
         self._embedder_failed = False
 
     def _get_embedder(self):
-        """Lazy-loads FastEmbed ONNX embedding model."""
-        if self._embedder is None and not self._embedder_failed:
-            try:
-                from fastembed import TextEmbedding
-                logger.info(f"Loading FastEmbed model: {settings.EMBEDDING_MODEL}")
-                self._embedder = TextEmbedding(model_name=settings.EMBEDDING_MODEL, max_workers=1)
-                logger.info("FastEmbed embedding model loaded successfully.")
-            except Exception as e:
-                logger.warning(f"FastEmbed failed to initialize: {e}. Falling back to TF-IDF bag-of-words vectors.")
-                self._embedder_failed = True
-        return self._embedder
+        """FastEmbed disabled for this deployment — memory footprint (ONNX runtime +
+        model weights) exceeds Render free tier's 512MB limit. Using _fallback_embed
+        (hash-based vectors) instead. Re-enable only on a plan with more available RAM."""
+        return None
 
     def embed_texts(self, texts: List[str]) -> np.ndarray:
         """Embeds a list of texts into normalized numpy vectors."""
